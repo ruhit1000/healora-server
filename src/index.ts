@@ -41,7 +41,7 @@ async function bootstrapServer() {
     await client.connect();
     console.log("🍃 MongoDB connected successfully via native driver");
 
-    database = client.db("healora-app");
+    database = client.db("healora_db");
     
     // Core structural collections
     sessionsCollection = database.collection("sessions");
@@ -190,6 +190,40 @@ app.get("/api/doctors", async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: "Failed to parse directory registry database metadata",
+      error: error.message
+    });
+  }
+});
+
+// GET ALL UNIQUE SPECIALTIES FROM APPROVED DOCTORS (PUBLIC)
+app.get("/api/doctors/specialties", async (req: Request, res: Response) => {
+  try {
+    const aggregationResult = await doctorsCollection
+      .aggregate([
+        { 
+          $match: { isApproved: { $in: [true, "true"] } } 
+        },
+        { 
+          $group: { _id: "$specialty" } 
+        },
+        { 
+          $sort: { _id: 1 } 
+        }
+      ])
+      .toArray();
+
+    const cleanSpecialties = aggregationResult
+      .map(item => item._id)
+      .filter((spec): spec is string => typeof spec === "string" && spec.trim() !== "");
+
+    res.status(200).json({
+      success: true,
+      data: cleanSpecialties
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to compile dynamic specialty registry map",
       error: error.message
     });
   }
