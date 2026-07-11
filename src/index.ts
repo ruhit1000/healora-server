@@ -229,6 +229,63 @@ app.get("/api/doctors/specialties", async (req: Request, res: Response) => {
   }
 });
 
+// GET SINGLE DOCTOR DETAILS BY ID (PUBLIC)
+app.get("/api/doctors/:id", async (req: Request, res: Response) => {
+  try {
+    if (!doctorsCollection) {
+      const databaseInstance = client.db("healora-app");
+      doctorsCollection = databaseInstance.collection("doctors");
+    }
+
+    // 1. Extract and enforce parameter type verification
+    const { id } = req.params;
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid route query input parameters matrix parsing failed"
+      });
+    }
+
+    // 2. Validate format structure string length
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid Doctor ID format structural validation failed"
+      });
+    }
+
+    // 3. Document identification query matching
+    const doctor = await doctorsCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!doctor) {
+      return res.status(404).json({
+        success: false,
+        message: "No clinical profile located matching the specified identifier"
+      });
+    }
+
+    // 4. Safety Guard
+    if (doctor.isApproved !== true && doctor.isApproved !== "true") {
+      return res.status(403).json({
+        success: false,
+        message: "Access restricted: This profile is pending administrative verification"
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: doctor
+    });
+
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to parse clinical profile metadata register records",
+      error: error.message
+    });
+  }
+});
+
 app.listen(port, () => {
   console.log(`Healora API listening smoothly on port ${port}`);
 });
