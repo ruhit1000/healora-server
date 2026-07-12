@@ -1,8 +1,15 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
-import { MongoClient, ServerApiVersion, ObjectId, Db, Collection } from "mongodb";
+import {
+  MongoClient,
+  ServerApiVersion,
+  ObjectId,
+  Db,
+  Collection,
+} from "mongodb";
 import dns from "dns";
 import dotenv from "dotenv";
+import Stripe from "stripe";
 
 dotenv.config();
 
@@ -10,12 +17,70 @@ dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 const app = express();
 const port = process.env.PORT || 8000;
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
+const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
 
-// Universal Middleware Layout
-app.use(cors());
+// Universal Middleware Layout - Locked down to your specific frontend URL
+app.use(cors({
+  origin: clientUrl
+}));
+
+const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET as string;
+
+/* =========================================================================
+   ⚠️ STRIPE WEBHOOK (MUST GO BEFORE express.json() IS CALLED)
+   ========================================================================= */
+app.post(
+  "/api/webhooks/stripe",
+  express.raw({ type: "application/json" }),
+  async (req: Request, res: Response) => {
+    const sig = req.headers["stripe-signature"];
+    let event;
+
+    try {
+      event = stripe.webhooks.constructEvent(
+        req.body,
+        sig as string,
+        endpointSecret,
+      );
+    } catch (err: any) {
+      console.error(`Webhook signature verification failed: ${err.message}`);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    if (event.type === "checkout.session.completed") {
+      const session = event.data.object as Stripe.Checkout.Session;
+      const bookingId = session.metadata?.bookingId;
+
+      if (bookingId) {
+        try {
+          await bookingsCollection.updateOne(
+            { _id: new ObjectId(bookingId) },
+            {
+              $set: {
+                paymentStatus: "Paid",
+                bookingStatus: "Confirmed",
+                updatedAt: new Date(),
+              },
+              $unset: {
+                lockExpiresAt: "",
+              },
+            },
+          );
+          console.log(`✅ SUCCESS: Booking ${bookingId} confirmed and paid.`);
+        } catch (dbError) {
+          console.error("Failed to update booking status in MongoDB:", dbError);
+        }
+      }
+    }
+
+    res.status(200).send();
+  },
+);
+
+// NOW you can apply standard JSON parsing for all the other routes
 app.use(express.json());
 
-// Explicit TypeScript Interface Mapping for Global Routing Context Injection
 interface AuthenticatedRequest extends Request {
   user?: any;
 }
@@ -30,11 +95,11 @@ const client = new MongoClient(uri, {
   },
 });
 
-// Global collection definitions explicitly mapped with proper TypeScript strict checks
 let database: Db;
 let sessionsCollection: Collection;
 let usersCollection: Collection;
 let doctorsCollection: Collection;
+let bookingsCollection: Collection; 
 
 async function bootstrapServer() {
   try {
@@ -42,13 +107,29 @@ async function bootstrapServer() {
     console.log("🍃 MongoDB connected successfully via native driver");
 
     database = client.db("healora_db");
-    
-    // Core structural collections
-    sessionsCollection = database.collection("sessions");
-    usersCollection = database.collection("users");
-    doctorsCollection = database.collection("doctors");
 
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    sessionsCollection = database.collection("session");
+    usersCollection = database.collection("user");
+    doctorsCollection = database.collection("doctors");
+    bookingsCollection = database.collection("bookings"); 
+
+    // 1. Auto-Delete TTL Index for abandoned checkouts
+    await bookingsCollection.createIndex(
+      { lockExpiresAt: 1 },
+      { expireAfterSeconds: 0 },
+    );
+    console.log("⏱️ TTL Index established on bookingsCollection");
+
+    // 2. Strict Unique Index to prevent millisecond race-condition double bookings
+    await bookingsCollection.createIndex(
+      { doctorId: 1, appointmentDate: 1, appointmentTime: 1 },
+      { unique: true }
+    );
+    console.log("🔒 Unique constraint index established on bookingsCollection");
+
+    console.log(
+      "Pinged your deployment. You successfully connected to MongoDB!",
+    );
   } catch (error) {
     console.error("❌ Failed to bind native MongoDB instance:", error);
   }
@@ -58,7 +139,11 @@ bootstrapServer();
 /* =========================================================================
        1. CUSTOM DATABASE SESSION VERIFICATION MIDDLEWARE
        ========================================================================= */
-const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+const verifyToken = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -75,7 +160,9 @@ const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextF
       return res.status(401).send({ message: "Unauthorized Access" });
     }
 
-    const user = await usersCollection.findOne({ _id: new ObjectId(session.userId as string) });
+    const user = await usersCollection.findOne({
+      _id: new ObjectId(session.userId as string),
+    });
     if (!user) {
       return res.status(401).send({ message: "Unauthorized Access" });
     }
@@ -92,21 +179,33 @@ const verifyToken = async (req: AuthenticatedRequest, res: Response, next: NextF
 /* =========================================================================
        2. ROLE SPECIFIC VERIFICATION MIDDLEWARES
        ========================================================================= */
-const verifyAdmin = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+const verifyAdmin = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) => {
   if (req.user?.role !== "admin") {
     return res.status(403).send({ message: "Forbidden Access" });
   }
   next();
 };
 
-const verifyDoctor = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+const verifyDoctor = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) => {
   if (req.user?.role !== "doctor") {
     return res.status(403).send({ message: "Forbidden Access" });
   }
   next();
 };
 
-const verifyPatient = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+const verifyPatient = async (
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) => {
   if (req.user?.role !== "patient") {
     return res.status(403).send({ message: "Forbidden Access" });
   }
@@ -117,47 +216,29 @@ const verifyPatient = async (req: AuthenticatedRequest, res: Response, next: Nex
        3. CORE API ENDPOINTS
        ========================================================================= */
 
-// HOME BASE ROUTE (PUBLIC)
 app.get("/", (req: Request, res: Response) => {
   res.send("Healora Secure Medical Scheduling Backend: ONLINE");
 });
 
-/* =========================================================================
-       PUBLIC DIRECTORY DIRECTORY SEARCH & PAGINATION ENGINE
-       ========================================================================= */
-
-// GET ALL APPROVED PUBLIC DOCTORS (WITH SEARCH, FILTER & PAGINATION)
 app.get("/api/doctors", async (req: Request, res: Response) => {
   try {
-    // 1. Destructure Query Parameters
     const { search, specialty, page } = req.query;
-
-    // 2. Build the Safe Filter Object
-    // We strictly query only approved doctors to safeguard patients
     const filterQuery: any = { isApproved: true };
 
-    // Handle Optional Name Search (Case-Insensitive Regex)
     if (search && typeof search === "string") {
       filterQuery.name = { $regex: search, $options: "i" };
     }
-
-    // Handle Optional Specialty Filter
     if (specialty && typeof specialty === "string") {
       filterQuery.specialty = specialty;
     }
 
-    // 3. Configure Pagination Controls
     const itemsPerPage = 12;
-    // Safely parse out user page parameters, defaulting to page 1
     const currentPage = page ? parseInt(page as string, 10) : 1;
     const skipCount = (currentPage - 1) * itemsPerPage;
-
-    // 4. Calculate Total Documents Matrix for Frontend Page Controls
-    const totalMatchingDoctors = await doctorsCollection.countDocuments(filterQuery);
+    const totalMatchingDoctors =
+      await doctorsCollection.countDocuments(filterQuery);
     const totalPages = Math.ceil(totalMatchingDoctors / itemsPerPage);
 
-    // 5. Query Database with Projection Optimization
-    // We explicitly project only card fields, omitting heavy biographical/history strings
     const doctors = await doctorsCollection
       .find(filterQuery)
       .project({
@@ -168,126 +249,242 @@ app.get("/api/doctors", async (req: Request, res: Response) => {
         fee: 1,
         location: 1,
         availabilitySummary: 1,
-        patientSatisfactoryScore: { averageRating: 1 }
+        patientSatisfactoryScore: { averageRating: 1 },
       })
       .skip(skipCount)
       .limit(itemsPerPage)
       .toArray();
 
-    // 6. Return Structured Unified Response Payload
     res.status(200).json({
       success: true,
       meta: {
         totalDoctors: totalMatchingDoctors,
-        totalPages: totalPages,
-        currentPage: currentPage,
-        limit: itemsPerPage
+        totalPages,
+        currentPage,
+        limit: itemsPerPage,
       },
-      data: doctors
+      data: doctors,
     });
-
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to parse directory registry database metadata",
-      error: error.message
-    });
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "Failed to parse directory",
+        error: error.message,
+      });
   }
 });
 
-// GET ALL UNIQUE SPECIALTIES FROM APPROVED DOCTORS (PUBLIC)
 app.get("/api/doctors/specialties", async (req: Request, res: Response) => {
   try {
     const aggregationResult = await doctorsCollection
       .aggregate([
-        { 
-          $match: { isApproved: { $in: [true, "true"] } } 
-        },
-        { 
-          $group: { _id: "$specialty" } 
-        },
-        { 
-          $sort: { _id: 1 } 
-        }
+        { $match: { isApproved: { $in: [true, "true"] } } },
+        { $group: { _id: "$specialty" } },
+        { $sort: { _id: 1 } },
       ])
       .toArray();
 
     const cleanSpecialties = aggregationResult
-      .map(item => item._id)
-      .filter((spec): spec is string => typeof spec === "string" && spec.trim() !== "");
+      .map((item) => item._id)
+      .filter(
+        (spec): spec is string =>
+          typeof spec === "string" && spec.trim() !== "",
+      );
 
-    res.status(200).json({
-      success: true,
-      data: cleanSpecialties
-    });
+    res.status(200).json({ success: true, data: cleanSpecialties });
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to compile dynamic specialty registry map",
-      error: error.message
-    });
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "Failed to compile specialty registry",
+        error: error.message,
+      });
   }
 });
 
-// GET SINGLE DOCTOR DETAILS BY ID (PUBLIC)
 app.get("/api/doctors/:id", async (req: Request, res: Response) => {
   try {
-    if (!doctorsCollection) {
-      const databaseInstance = client.db("healora-app");
-      doctorsCollection = databaseInstance.collection("doctors");
-    }
-
-    // 1. Extract and enforce parameter type verification
     const { id } = req.params;
-    if (!id || typeof id !== "string") {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid route query input parameters matrix parsing failed"
-      });
+    if (!id || typeof id !== "string" || !ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid Doctor ID format" });
     }
 
-    // 2. Validate format structure string length
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid Doctor ID format structural validation failed"
-      });
-    }
-
-    // 3. Document identification query matching
     const doctor = await doctorsCollection.findOne({ _id: new ObjectId(id) });
-
     if (!doctor) {
-      return res.status(404).json({
-        success: false,
-        message: "No clinical profile located matching the specified identifier"
-      });
+      return res
+        .status(404)
+        .json({ success: false, message: "Profile not found" });
     }
-
-    // 4. Safety Guard
     if (doctor.isApproved !== true && doctor.isApproved !== "true") {
-      return res.status(403).json({
-        success: false,
-        message: "Access restricted: This profile is pending administrative verification"
-      });
+      return res
+        .status(403)
+        .json({ success: false, message: "Profile pending verification" });
     }
 
-    res.status(200).json({
-      success: true,
-      data: doctor
-    });
-
+    res.status(200).json({ success: true, data: doctor });
   } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to parse clinical profile metadata register records",
-      error: error.message
-    });
+    res
+      .status(500)
+      .json({ success: false, message: "Server error", error: error.message });
   }
 });
+
+/* =========================================================================
+       4. BOOKING & CHECKOUT ENGINE
+       ========================================================================= */
+
+app.get("/api/bookings/schedule", async (req: Request, res: Response) => {
+  try {
+    const { doctorId, date } = req.query;
+
+    if (
+      !doctorId ||
+      typeof doctorId !== "string" ||
+      !date ||
+      typeof date !== "string"
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Doctor ID and date required" });
+    }
+
+    const bookedSlots = await bookingsCollection
+      .find({
+        doctorId: new ObjectId(doctorId),
+        appointmentDate: date,
+        bookingStatus: { $in: ["Locked", "Confirmed"] },
+      })
+      .project({ appointmentTime: 1 })
+      .toArray();
+
+    const disabledTimes = bookedSlots.map((b) => b.appointmentTime);
+
+    res.status(200).json({ success: true, data: disabledTimes });
+  } catch (error: any) {
+    res
+      .status(500)
+      .json({
+        success: false,
+        message: "Failed to fetch schedule",
+        error: error.message,
+      });
+  }
+});
+
+app.post(
+  "/api/bookings/initialize",
+  verifyToken,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const { doctorId, appointmentDate, appointmentTime, intake } = req.body;
+      const patientUserId = req.user._id;
+
+      const existingBooking = await bookingsCollection.findOne({
+        doctorId: new ObjectId(doctorId as string),
+        appointmentDate,
+        appointmentTime,
+        bookingStatus: { $in: ["Locked", "Confirmed"] },
+      });
+
+      if (existingBooking) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This slot was just booked by someone else. Please choose another time.",
+        });
+      }
+
+      const doctor = await doctorsCollection.findOne({
+        _id: new ObjectId(doctorId as string),
+      });
+      if (!doctor) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Doctor not found." });
+      }
+
+      const now = new Date();
+      const lockExpiration = new Date(now.getTime() + 10 * 60 * 1000);
+
+      const newBookingDocument = {
+        patientUserId: patientUserId, 
+        doctorId: new ObjectId(doctorId as string),
+        appointmentDate,
+        appointmentTime,
+        patientDetails: {
+          patientName: intake.patientName,
+          age: Number(intake.age),
+          gender: intake.gender,
+          reasonForVisit: intake.reason || "",
+        },
+        consultationFee: doctor.fee,
+        bookingStatus: "Locked",
+        paymentStatus: "Pending",
+        lockExpiresAt: lockExpiration,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      const insertResult =
+        await bookingsCollection.insertOne(newBookingDocument);
+      const newBookingId = insertResult.insertedId.toString();
+
+      const session = await stripe.checkout.sessions.create({
+        payment_method_types: ["card"],
+        mode: "payment",
+        customer_email: req.user?.email || undefined, // Safely handles missing emails
+        line_items: [
+          {
+            price_data: {
+              currency: "bdt", // Swap to "usd" if your live Stripe rejects bdt
+              product_data: {
+                name: `Consultation with ${doctor.name}`,
+                description: `${appointmentDate} @ ${appointmentTime} for ${intake.patientName}`,
+              },
+              unit_amount: Math.round(doctor.fee * 100), // Prevents crash from decimals
+            },
+            quantity: 1,
+          },
+        ],
+        metadata: { bookingId: newBookingId },
+        success_url: `${clientUrl}/booking-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${clientUrl}/doctors/${doctorId}?payment=cancelled`,
+      });
+
+      await bookingsCollection.updateOne(
+        { _id: insertResult.insertedId },
+        { $set: { stripeSessionId: session.id, updatedAt: new Date() } },
+      );
+
+      res.status(200).json({ success: true, url: session.url });
+    } catch (error: any) {
+      // Handles race condition rejection from the new unique index
+      if (error.code === 11000) {
+        return res.status(409).json({
+          success: false,
+          message: "This slot was just booked by someone else. Please choose another time.",
+        });
+      }
+
+      console.error(error);
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: "Checkout failed",
+          error: error.message,
+        });
+    }
+  },
+);
 
 app.listen(port, () => {
   console.log(`Healora API listening smoothly on port ${port}`);
 });
 
-module.exports = app;
+export default app;
