@@ -582,6 +582,67 @@ app.get(
   }
 );
 
+app.get(
+  "/api/patient/dashboard/appointments",
+  verifyToken,
+  verifyPatient,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const patientUserId = req.user._id;
+
+      // Get current date string (YYYY-MM-DD) for accurate future filtering
+      const today = new Date();
+      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+
+      // Fetch upcoming appointments that are either Confirmed or actively Locked
+      const appointments = await bookingsCollection
+        .find({
+          patientUserId: patientUserId,
+          bookingStatus: { $in: ["Confirmed", "Locked"] },
+          appointmentDate: { $gte: todayStr },
+        })
+        .sort({ appointmentDate: 1, appointmentTime: 1 })
+        .toArray();
+
+      // Stitch doctor profile information onto each appointment payload
+      const populatedAppointments = await Promise.all(
+        appointments.map(async (appt) => {
+          const doctor = await doctorsCollection.findOne(
+            { _id: new ObjectId(appt.doctorId) },
+            { projection: { name: 1, specialty: 1, image: 1, location: 1 } }
+          );
+          
+          // Explicitly return the spread fields alongside doctorDetails
+          return {
+            ...appt,
+            bookingStatus: appt.bookingStatus,
+            doctorDetails: doctor
+          };
+        })
+      );
+
+      // Separate the appointments into active vs pending channels for frontend tabs
+      const confirmed = populatedAppointments.filter(a => a.bookingStatus === "Confirmed");
+      const pending = populatedAppointments.filter(a => a.bookingStatus === "Locked");
+
+      res.status(200).json({
+        success: true,
+        data: {
+          confirmed,
+          pending
+        }
+      });
+    } catch (error: any) {
+      console.error("Fetch Patient Appointments Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to load appointments",
+        error: error.message,
+      });
+    }
+  }
+);
+
 app.listen(port, () => {
   console.log(`Healora API listening smoothly on port ${port}`);
 });
