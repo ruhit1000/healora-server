@@ -643,6 +643,60 @@ app.get(
   }
 );
 
+app.get(
+  "/api/patient/dashboard/history",
+  verifyToken,
+  verifyPatient,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const patientUserId = req.user._id;
+
+      const today = new Date();
+      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+
+      // Fetch appointments that are either Completed, Cancelled, OR fall in the past
+      const history = await bookingsCollection
+        .find({
+          patientUserId: patientUserId,
+          $or: [
+            { bookingStatus: { $in: ["Completed", "Cancelled"] } },
+            { appointmentDate: { $lt: todayStr } }
+          ]
+        })
+        .sort({ appointmentDate: -1, appointmentTime: -1 }) // Most recent past visits first
+        .toArray();
+
+      // Stitch doctor profile information onto each history item
+      const populatedHistory = await Promise.all(
+        history.map(async (appt) => {
+          const doctor = await doctorsCollection.findOne(
+            { _id: new ObjectId(appt.doctorId) },
+            { projection: { name: 1, specialty: 1, image: 1 } }
+          );
+          
+          return {
+            ...appt,
+            bookingStatus: appt.bookingStatus,
+            doctorDetails: doctor
+          };
+        })
+      );
+
+      res.status(200).json({
+        success: true,
+        data: populatedHistory
+      });
+    } catch (error: any) {
+      console.error("Fetch Patient History Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to load consultation history",
+        error: error.message,
+      });
+    }
+  }
+);
+
 app.listen(port, () => {
   console.log(`Healora API listening smoothly on port ${port}`);
 });
