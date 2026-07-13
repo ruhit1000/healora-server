@@ -483,6 +483,105 @@ app.post(
   },
 );
 
+// Dashboard API Endpoints for Patients
+// Overview of bookings, payment status, and upcoming appointments
+app.get(
+  "/api/patient/dashboard/overview",
+  verifyToken,
+  verifyPatient,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const patientUserId = req.user._id;
+
+      // 1. Get today's date as a string (assuming appointmentDate is stored as YYYY-MM-DD)
+      const today = new Date();
+      // Adjusting for your timezone (Bangladesh) to ensure accurate "today" calculations
+      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+
+      // 2. Fetch all upcoming confirmed bookings
+      const upcomingBookings = await bookingsCollection
+        .find({
+          patientUserId: patientUserId,
+          bookingStatus: "Confirmed",
+          appointmentDate: { $gte: todayStr },
+        })
+        .sort({ appointmentDate: 1, appointmentTime: 1 })
+        .toArray();
+
+      const upcomingCount = upcomingBookings.length;
+      let nextAppointment = upcomingBookings[0] || null;
+
+      // If there is a next appointment, fetch the doctor's details for the UI card
+      if (nextAppointment) {
+        const doctor = await doctorsCollection.findOne(
+          { _id: new ObjectId(nextAppointment.doctorId) },
+          { projection: { name: 1, specialty: 1, location: 1, image: 1 } }
+        );
+        nextAppointment.doctorDetails = doctor;
+      }
+
+      // 3. Calculate total spent (Payment Status: Paid)
+      const paidBookings = await bookingsCollection
+        .find({ patientUserId: patientUserId, paymentStatus: "Paid" })
+        .project({ consultationFee: 1 })
+        .toArray();
+      
+      const totalSpent = paidBookings.reduce((sum, booking) => sum + (booking.consultationFee || 0), 0);
+
+      // 4. Count total completed consultations
+      const completedCount = await bookingsCollection.countDocuments({
+        patientUserId: patientUserId,
+        bookingStatus: "Completed",
+      });
+
+      // 5. Fetch Recent Activity (Last 3 appointments, either past dates or completed/cancelled)
+      const recentActivity = await bookingsCollection
+        .find({
+          patientUserId: patientUserId,
+          $or: [
+            { bookingStatus: { $in: ["Completed", "Cancelled"] } },
+            { appointmentDate: { $lt: todayStr } }
+          ]
+        })
+        .sort({ appointmentDate: -1, createdAt: -1 })
+        .limit(3)
+        .toArray();
+
+      // Attach doctor names to recent activity for the UI table
+      const recentActivityWithDoctors = await Promise.all(
+        recentActivity.map(async (activity) => {
+          const doctor = await doctorsCollection.findOne(
+            { _id: new ObjectId(activity.doctorId) },
+            { projection: { name: 1, specialty: 1 } }
+          );
+          return { ...activity, doctorDetails: doctor };
+        })
+      );
+
+      // 6. Send the aggregated payload
+      res.status(200).json({
+        success: true,
+        data: {
+          stats: {
+            upcomingCount,
+            completedCount,
+            totalSpent,
+          },
+          nextAppointment,
+          recentActivity: recentActivityWithDoctors,
+        },
+      });
+    } catch (error: any) {
+      console.error("Dashboard Overview Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to load dashboard data",
+        error: error.message,
+      });
+    }
+  }
+);
+
 app.listen(port, () => {
   console.log(`Healora API listening smoothly on port ${port}`);
 });
