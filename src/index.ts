@@ -489,7 +489,6 @@ app.post(
 );
 
 // Dashboard API Endpoints for Patients
-// Overview of bookings, payment status, and upcoming appointments
 app.get(
   "/api/patient/dashboard/overview",
   verifyToken,
@@ -696,6 +695,72 @@ app.get(
       res.status(500).json({
         success: false,
         message: "Failed to load consultation history",
+        error: error.message,
+      });
+    }
+  }
+);
+
+// Dashboard API Endpoints for Doctors
+app.get(
+  "/api/doctor/dashboard/overview",
+  verifyToken,
+  verifyDoctor,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const doctorUserId = req.user._id;
+
+      // 1. Fetch the doctor's specific public directory profile to read fees and approval state
+      const doctorProfile = await doctorsCollection.findOne({
+        // Assuming your doctor profile links to the authentication user record via a userId field
+        userId: new ObjectId(doctorUserId),
+      });
+
+      if (!doctorProfile) {
+        return res.status(404).json({ success: false, message: "Doctor profile configuration not found." });
+      }
+
+      // 2. Compute date boundaries for today (Bangladesh Timezone Synchronization)
+      const today = new Date();
+      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+
+      // 3. Fetch all active bookings mapped to this doctor for today
+      const todayBookings = await bookingsCollection
+        .find({
+          doctorId: doctorProfile._id,
+          appointmentDate: todayStr,
+          bookingStatus: { $in: ["Confirmed", "Completed", "Cancelled"] }
+        })
+        .sort({ appointmentTime: 1 })
+        .toArray();
+
+      // 4. Calculate metric counters out of today's snapshot payload
+      const remainingToday = todayBookings.filter(b => b.bookingStatus === "Confirmed").length;
+      const completedToday = todayBookings.filter(b => b.bookingStatus === "Completed").length;
+      
+      // Calculate earnings purely from completed or confirmed paid visits today
+      const earningsToday = todayBookings
+        .filter(b => b.bookingStatus !== "Cancelled" && b.paymentStatus === "Paid")
+        .reduce((sum, b) => sum + (b.consultationFee || 0), 0);
+
+      // 5. Package and return the structured overview payload
+      res.status(200).json({
+        success: true,
+        data: {
+          isApproved: doctorProfile.isApproved === true || doctorProfile.isApproved === "true",
+          stats: {
+            remainingToday,
+            completedToday,
+            earningsToday,
+          },
+          queue: todayBookings,
+        },
+      });
+    } catch (error: any) {
+      console.error("Doctor Dashboard Overview Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to load clinical dashboard overview metrics.",
         error: error.message,
       });
     }
