@@ -100,6 +100,7 @@ let sessionsCollection: Collection;
 let usersCollection: Collection;
 let doctorsCollection: Collection;
 let bookingsCollection: Collection; 
+let profilesCollection: Collection;
 
 async function bootstrapServer() {
   try {
@@ -112,6 +113,10 @@ async function bootstrapServer() {
     usersCollection = database.collection("user");
     doctorsCollection = database.collection("doctors");
     bookingsCollection = database.collection("bookings"); 
+    profilesCollection = database.collection("profiles");
+
+    await profilesCollection.createIndex({ userId: 1 }, { unique: true });
+    console.log("👤 Unique index established on profilesCollection");
 
     // 1. Auto-Delete TTL Index for abandoned checkouts
     await bookingsCollection.createIndex(
@@ -693,6 +698,82 @@ app.get(
         message: "Failed to load consultation history",
         error: error.message,
       });
+    }
+  }
+);
+
+// 1. GET PATIENT PROFILE DATA
+app.get(
+  "/api/patient/profile",
+  verifyToken,
+  verifyPatient,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user._id;
+
+      // Find extended profile information if it exists
+      const extendedProfile = await profilesCollection.findOne({
+        userId: new ObjectId(userId),
+      });
+
+      // Combine BetterAuth core user data with our extended medical data
+      res.status(200).json({
+        success: true,
+        data: {
+          name: req.user.name,
+          email: req.user.email,
+          phone: extendedProfile?.phone || "",
+          gender: extendedProfile?.gender || "",
+          dateOfBirth: extendedProfile?.dateOfBirth || "",
+          bloodGroup: extendedProfile?.bloodGroup || "",
+          address: extendedProfile?.address || "",
+          emergencyContact: extendedProfile?.emergencyContact || "",
+        },
+      });
+    } catch (error: any) {
+      console.error("Fetch Profile Error:", error);
+      res.status(500).json({ success: false, message: "Failed to load profile state", error: error.message });
+    }
+  }
+);
+
+// 2. UPDATE / UPSERT PATIENT PROFILE DATA
+app.post(
+  "/api/patient/profile",
+  verifyToken,
+  verifyPatient,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user._id;
+      const { name, phone, gender, dateOfBirth, bloodGroup, address, emergencyContact } = req.body;
+
+      // Update core user display name in BetterAuth users collection
+      await usersCollection.updateOne(
+        { _id: new ObjectId(userId) },
+        { $set: { name, updatedAt: new Date() } }
+      );
+
+      // Upsert extended details inside our custom profiles collection
+      await profilesCollection.updateOne(
+        { userId: new ObjectId(userId) },
+        {
+          $set: {
+            phone,
+            gender,
+            dateOfBirth,
+            bloodGroup,
+            address,
+            emergencyContact,
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true } // Creates the document if it doesn't exist yet
+      );
+
+      res.status(200).json({ success: true, message: "Profile synchronized successfully" });
+    } catch (error: any) {
+      console.error("Update Profile Error:", error);
+      res.status(500).json({ success: false, message: "Failed to update profile changes", error: error.message });
     }
   }
 );
