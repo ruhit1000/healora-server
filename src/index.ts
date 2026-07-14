@@ -1436,7 +1436,6 @@ app.get(
   }
 );
 
-// 1. GET PATIENT PROFILE DATA
 app.get(
   "/api/patient/profile",
   verifyToken,
@@ -1475,6 +1474,132 @@ app.get(
         });
     }
   },
+);
+
+// 1. GET: Fetch, filter, and search all website users
+app.get(
+  "/api/admin/users",
+  verifyToken,
+  verifyAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const skip = (page - 1) * limit;
+      const roleFilter = req.query.role as string; // Expects "All", "patient", "doctor", "admin"
+      const searchQuery = req.query.search as string;
+
+      // Build dynamic match stage based on role and text search queries
+      const matchStage: any = {};
+
+      if (roleFilter && roleFilter !== "All") {
+        matchStage.role = roleFilter.toLowerCase();
+      }
+
+      if (searchQuery) {
+        matchStage.$or = [
+          { name: { $regex: searchQuery, $options: "i" } },
+          { email: { $regex: searchQuery, $options: "i" } }
+        ];
+      }
+
+      // Query database concurrently using a facet layout
+      const aggregationResult = await usersCollection.aggregate([
+        { $match: matchStage },
+        {
+          $facet: {
+            metaSummary: [{ $count: "totalRecords" }],
+            recordsData: [
+              { $sort: { createdAt: -1 } },
+              { $skip: skip },
+              { $limit: limit },
+              {
+                $project: {
+                  _id: 1,
+                  name: 1,
+                  email: 1,
+                  role: 1,
+                  createdAt: 1
+                }
+              }
+            ]
+          }
+        }
+      ]).toArray();
+
+      const facetData = aggregationResult[0];
+      const totalResults = facetData?.metaSummary[0]?.totalRecords || 0;
+      const usersList = facetData?.recordsData || [];
+
+      res.status(200).json({
+        success: true,
+        pagination: {
+          currentPage: page,
+          limit: limit,
+          totalPages: Math.ceil(totalResults / limit) || 1,
+          totalResults
+        },
+        data: usersList
+      });
+    } catch (error: any) {
+      console.error("Admin Fetch Users Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch platform users list.",
+        error: error.message
+      });
+    }
+  }
+);
+
+// 2. PATCH: Promote or Demote user administrative credentials
+app.patch(
+  "/api/admin/users/:id/role",
+  verifyToken,
+  verifyAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const targetUserId = req.params.id;
+      const { targetRole } = req.body; // Expects "admin" or "patient" (demoted base state)
+
+      if (!ObjectId.isValid(targetUserId as string)) {
+        return res.status(400).json({ success: false, message: "Invalid User ID format." });
+      }
+
+      if (targetRole !== "admin" && targetRole !== "patient") {
+        return res.status(400).json({ success: false, message: "Invalid role operation assignment." });
+      }
+
+      // CRITICAL SECURITY GUARDRAIL: Prevent active admin from accidentally locking themselves out
+      if (req.user?._id && req.user._id.toString() === targetUserId && targetRole !== "admin") {
+        return res.status(403).json({ 
+          success: false, 
+          message: "Security violation: You cannot revoke your own administrative clearance." 
+        });
+      }
+
+      const result = await usersCollection.updateOne(
+        { _id: new ObjectId(targetUserId as string) },
+        { $set: { role: targetRole } }
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ success: false, message: "Target user account not found." });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `User account role successfully modified to ${targetRole}.`
+      });
+    } catch (error: any) {
+      console.error("Admin Modify User Role Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to process role adjustment request.",
+        error: error.message
+      });
+    }
+  }
 );
 
 // 2. UPDATE / UPSERT PATIENT PROFILE DATA
