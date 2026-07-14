@@ -867,6 +867,56 @@ app.post(
   }
 );
 
+app.put(
+  "/api/doctor/schedule",
+  verifyToken,
+  verifyDoctor,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const doctorUserId = req.user._id;
+      const { weeklySlots } = req.body;
+
+      // Validate that weeklySlots is provided and is an array
+      if (!Array.isArray(weeklySlots)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid payload format. Expected an array of weekly slots.",
+        });
+      }
+
+      // Update ONLY the weeklySlots array for the authenticated doctor
+      const result = await doctorsCollection.updateOne(
+        { userId: new ObjectId(doctorUserId) },
+        {
+          $set: {
+            weeklySlots: weeklySlots,
+            updatedAt: new Date(),
+          },
+        }
+      );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Doctor profile not found. Please complete your profile onboarding first.",
+        });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: "Weekly schedule updated successfully.",
+      });
+    } catch (error: any) {
+      console.error("Update Doctor Schedule Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update schedule rules.",
+        error: error.message,
+      });
+    }
+  }
+);
+
 // 1. GET PATIENT PROFILE DATA
 app.get(
   "/api/patient/profile",
