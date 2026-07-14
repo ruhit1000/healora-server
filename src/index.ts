@@ -1320,6 +1320,122 @@ app.patch(
   },
 );
 
+app.get(
+  "/api/admin/bookings",
+  verifyToken,
+  verifyAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 10;
+      const skip = (page - 1) * limit;
+      const statusFilter = req.query.status as string; 
+      const searchQuery = req.query.search as string;
+
+      const matchStage: any = {};
+      if (statusFilter && statusFilter !== "All") {
+        matchStage.paymentStatus = statusFilter;
+      }
+
+      const aggregationResult = await bookingsCollection.aggregate([
+        { $match: matchStage },
+        {
+          $lookup: {
+            from: "doctors",
+            localField: "doctorId", 
+            foreignField: "_id",
+            as: "doctorInfo"
+          }
+        },
+        { $unwind: { path: "$doctorInfo", preserveNullAndEmptyArrays: true } },
+
+        ...(searchQuery 
+          ? [{
+              $match: {
+                $or: [
+                  { "patientDetails.patientName": { $regex: searchQuery, $options: "i" } },
+                  { "doctorInfo.name": { $regex: searchQuery, $options: "i" } },
+                  { "doctorInfo.specialty": { $regex: searchQuery, $options: "i" } }
+                ]
+              }
+            }]
+          : []
+        ),
+
+        {
+          $facet: {
+            metaSummary: [
+              {
+                $group: {
+                  _id: null,
+                  totalRecords: { $sum: 1 },
+                  grossVolume: {
+                    $sum: { $cond: [{ $eq: ["$paymentStatus", "Paid"] }, "$consultationFee", 0] }
+                  },
+                  completedCount: {
+                    $sum: { $cond: [{ $eq: ["$bookingStatus", "Completed"] }, 1, 0] }
+                  },
+                  pendingPaymentCount: {
+                    $sum: { $cond: [{ $eq: ["$paymentStatus", "Pending"] }, 1, 0] }
+                  }
+                }
+              }
+            ],
+            recordsData: [
+              { $sort: { createdAt: -1 } },
+              { $skip: skip },
+              { $limit: limit },
+              {
+                $project: {
+                  _id: 1,
+                  appointmentDate: 1,
+                  appointmentTime: 1,
+                  consultationFee: 1,
+                  paymentStatus: 1,
+                  appointmentStatus: "$bookingStatus",
+                  createdAt: 1,
+                  patientName: "$patientDetails.patientName",
+                  doctorName: "$doctorInfo.name",
+                  doctorSpecialty: "$doctorInfo.specialty"
+                }
+              }
+            ]
+          }
+        }
+      ]).toArray();
+
+      const facetData = aggregationResult[0];
+      const stats = facetData?.metaSummary[0] || { totalRecords: 0, grossVolume: 0, completedCount: 0, pendingPaymentCount: 0 };
+      const bookingsList = facetData?.recordsData || [];
+
+      res.status(200).json({
+        success: true,
+        metrics: {
+          totalAppointments: stats.totalRecords,
+          grossVolume: stats.grossVolume,
+          completedCount: stats.completedCount,
+          pendingPaymentCount: stats.pendingPaymentCount
+        },
+        pagination: {
+          currentPage: page,
+          limit: limit,
+          totalPages: Math.ceil(stats.totalRecords / limit) || 1,
+          totalResults: stats.totalRecords
+        },
+        data: bookingsList
+      });
+
+    } catch (error: any) {
+      console.error("Global Bookings Compiling Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to compile the system bookings ledger.",
+        error: error.message
+      });
+    }
+  }
+);
+
 // 1. GET PATIENT PROFILE DATA
 app.get(
   "/api/patient/profile",
