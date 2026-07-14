@@ -917,6 +917,111 @@ app.put(
   }
 );
 
+app.get(
+  "/api/doctor/earnings",
+  verifyToken,
+  verifyDoctor,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const doctorId = req.user._id;
+
+      // Calculate the start of the current month (e.g., July 1, 2026)
+      const now = new Date();
+      const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+      const earningsData = await bookingsCollection
+        .aggregate([
+          {
+            $match: { doctorId: new ObjectId(doctorId) },
+          },
+          {
+            $facet: {
+              // Pipeline 1: Calculate high-level financial metrics
+              metrics: [
+                {
+                  $group: {
+                    _id: null,
+                    totalEarned: {
+                      $sum: {
+                        $cond: [{ $eq: ["$paymentStatus", "Paid"] }, "$consultationFee", 0],
+                      },
+                    },
+                    pendingAmount: {
+                      $sum: {
+                        $cond: [{ $ne: ["$paymentStatus", "Paid"] }, "$consultationFee", 0],
+                      },
+                    },
+                    totalPaidAppointments: {
+                      $sum: {
+                        $cond: [{ $eq: ["$paymentStatus", "Paid"] }, 1, 0],
+                      },
+                    },
+                    thisMonthEarned: {
+                      $sum: {
+                        $cond: [
+                          {
+                            $and: [
+                              { $eq: ["$paymentStatus", "Paid"] },
+                              { $gte: ["$createdAt", firstDayOfMonth] },
+                            ],
+                          },
+                          "$consultationFee",
+                          0,
+                        ],
+                      },
+                    },
+                  },
+                },
+              ],
+              // Pipeline 2: Fetch the most recent 20 transactions for the ledger
+              recentTransactions: [
+                { $sort: { createdAt: -1 } },
+                { $limit: 20 },
+                {
+                  $project: {
+                    _id: 1,
+                    appointmentDate: 1,
+                    patientName: "$patientDetails.patientName",
+                    stripeSessionId: 1,
+                    paymentStatus: 1,
+                    consultationFee: 1,
+                  },
+                },
+              ],
+            },
+          },
+        ])
+        .toArray();
+
+      // Extract from the facet structure or provide safe zero-defaults
+      const result = earningsData[0];
+      const metrics = result?.metrics?.[0] || {
+        totalEarned: 0,
+        pendingAmount: 0,
+        totalPaidAppointments: 0,
+        thisMonthEarned: 0,
+      };
+      
+      const transactions = result?.recentTransactions || [];
+
+      res.status(200).json({
+        success: true,
+        data: {
+          metrics,
+          transactions,
+        },
+      });
+    } catch (error: any) {
+      console.error("Fetch Doctor Earnings Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to generate financial report.",
+        error: error.message,
+      });
+    }
+  }
+);
+
 // 1. GET PATIENT PROFILE DATA
 app.get(
   "/api/patient/profile",
