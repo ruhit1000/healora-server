@@ -12,25 +12,70 @@ import dotenv from "dotenv";
 import Stripe from "stripe";
 
 dotenv.config();
-
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 const app = express();
 const port = process.env.PORT || 8000;
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
-
-// Universal Middleware Layout - Locked down to your specific frontend URL
-app.use(
-  cors({
-    origin: clientUrl,
-  }),
-);
-
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET as string;
 
+app.use(cors({ origin: clientUrl }));
+
+interface AuthenticatedRequest extends Request {
+  user?: any;
+}
+
+// Global Database Context
+let database: Db;
+let sessionsCollection: Collection;
+let usersCollection: Collection;
+let doctorsCollection: Collection;
+let bookingsCollection: Collection;
+let profilesCollection: Collection;
+
+const uri = process.env.MONGO_URI || "";
+const client = new MongoClient(uri, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
+});
+
+async function bootstrapServer() {
+  try {
+    await client.connect();
+    console.log("🍃 MongoDB connected successfully via native driver");
+
+    database = client.db("healora_db");
+    sessionsCollection = database.collection("session");
+    usersCollection = database.collection("user");
+    doctorsCollection = database.collection("doctors");
+    bookingsCollection = database.collection("bookings");
+    profilesCollection = database.collection("profiles");
+
+    await profilesCollection.createIndex({ userId: 1 }, { unique: true });
+    await bookingsCollection.createIndex(
+      { lockExpiresAt: 1 },
+      { expireAfterSeconds: 0 },
+    );
+    await bookingsCollection.createIndex(
+      { doctorId: 1, appointmentDate: 1, appointmentTime: 1 },
+      { unique: true },
+    );
+
+    console.log(
+      "🔒 Core system performance indexes synchronized successfully.",
+    );
+  } catch (error) {
+    console.error("❌ Failed to bind native MongoDB instance:", error);
+  }
+}
+bootstrapServer();
+
 /* =========================================================================
-   ⚠️ STRIPE WEBHOOK (MUST GO BEFORE express.json() IS CALLED)
+   STRIPE WEBHOOK (RAW SYSTEM BODY PARSING PRIOR TO GENERAL EXPRESS USE)
    ========================================================================= */
 app.post(
   "/api/webhooks/stripe",
@@ -64,88 +109,24 @@ app.post(
                 bookingStatus: "Confirmed",
                 updatedAt: new Date(),
               },
-              $unset: {
-                lockExpiresAt: "",
-              },
+              $unset: { lockExpiresAt: "" },
             },
           );
-          console.log(`✅ SUCCESS: Booking ${bookingId} confirmed and paid.`);
+          console.log(`✅ SUCCESS: Booking ${bookingId} confirmed.`);
         } catch (dbError) {
           console.error("Failed to update booking status in MongoDB:", dbError);
         }
       }
     }
-
     res.status(200).send();
   },
 );
 
-// NOW you can apply standard JSON parsing for all the other routes
 app.use(express.json());
 
-interface AuthenticatedRequest extends Request {
-  user?: any;
-}
-
-// Database Connection Orchestration
-const uri = process.env.MONGO_URI || "";
-const client = new MongoClient(uri, {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-});
-
-let database: Db;
-let sessionsCollection: Collection;
-let usersCollection: Collection;
-let doctorsCollection: Collection;
-let bookingsCollection: Collection;
-let profilesCollection: Collection;
-
-async function bootstrapServer() {
-  try {
-    await client.connect();
-    console.log("🍃 MongoDB connected successfully via native driver");
-
-    database = client.db("healora_db");
-
-    sessionsCollection = database.collection("session");
-    usersCollection = database.collection("user");
-    doctorsCollection = database.collection("doctors");
-    bookingsCollection = database.collection("bookings");
-    profilesCollection = database.collection("profiles");
-
-    await profilesCollection.createIndex({ userId: 1 }, { unique: true });
-    console.log("👤 Unique index established on profilesCollection");
-
-    // 1. Auto-Delete TTL Index for abandoned checkouts
-    await bookingsCollection.createIndex(
-      { lockExpiresAt: 1 },
-      { expireAfterSeconds: 0 },
-    );
-    console.log("⏱️ TTL Index established on bookingsCollection");
-
-    // 2. Strict Unique Index to prevent millisecond race-condition double bookings
-    await bookingsCollection.createIndex(
-      { doctorId: 1, appointmentDate: 1, appointmentTime: 1 },
-      { unique: true },
-    );
-    console.log("🔒 Unique constraint index established on bookingsCollection");
-
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!",
-    );
-  } catch (error) {
-    console.error("❌ Failed to bind native MongoDB instance:", error);
-  }
-}
-bootstrapServer();
-
 /* =========================================================================
-       1. CUSTOM DATABASE SESSION VERIFICATION MIDDLEWARE
-       ========================================================================= */
+   SECURITY ACCESS LAYER CONTROL MIDDLEWARE
+   ========================================================================= */
 const verifyToken = async (
   req: AuthenticatedRequest,
   res: Response,
@@ -153,26 +134,20 @@ const verifyToken = async (
 ) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader) {
+    if (!authHeader)
       return res.status(401).send({ message: "Unauthorized Access" });
-    }
 
     const token = authHeader.split(" ")[1];
-    if (!token) {
-      return res.status(401).send({ message: "Unauthorized Access" });
-    }
+    if (!token) return res.status(401).send({ message: "Unauthorized Access" });
 
     const session = await sessionsCollection.findOne({ token: token });
-    if (!session) {
+    if (!session)
       return res.status(401).send({ message: "Unauthorized Access" });
-    }
 
     const user = await usersCollection.findOne({
       _id: new ObjectId(session.userId as string),
     });
-    if (!user) {
-      return res.status(401).send({ message: "Unauthorized Access" });
-    }
+    if (!user) return res.status(401).send({ message: "Unauthorized Access" });
 
     req.user = user;
     next();
@@ -183,17 +158,13 @@ const verifyToken = async (
   }
 };
 
-/* =========================================================================
-       2. ROLE SPECIFIC VERIFICATION MIDDLEWARES
-       ========================================================================= */
 const verifyAdmin = async (
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction,
 ) => {
-  if (req.user?.role !== "admin") {
+  if (req.user?.role !== "admin")
     return res.status(403).send({ message: "Forbidden Access" });
-  }
   next();
 };
 
@@ -202,9 +173,8 @@ const verifyDoctor = async (
   res: Response,
   next: NextFunction,
 ) => {
-  if (req.user?.role !== "doctor") {
+  if (req.user?.role !== "doctor")
     return res.status(403).send({ message: "Forbidden Access" });
-  }
   next();
 };
 
@@ -213,16 +183,14 @@ const verifyPatient = async (
   res: Response,
   next: NextFunction,
 ) => {
-  if (req.user?.role !== "patient") {
+  if (req.user?.role !== "patient")
     return res.status(403).send({ message: "Forbidden Access" });
-  }
   next();
 };
 
 /* =========================================================================
-       3. CORE API ENDPOINTS
-       ========================================================================= */
-
+   PUBLIC SYSTEM ACCESS CONTROL ROUTES
+   ========================================================================= */
 app.get("/", (req: Request, res: Response) => {
   res.send("Healora Secure Medical Scheduling Backend: ONLINE");
 });
@@ -244,7 +212,6 @@ app.get("/api/doctors", async (req: Request, res: Response) => {
     const skipCount = (currentPage - 1) * itemsPerPage;
     const totalMatchingDoctors =
       await doctorsCollection.countDocuments(filterQuery);
-    const totalPages = Math.ceil(totalMatchingDoctors / itemsPerPage);
 
     const doctors = await doctorsCollection
       .find(filterQuery)
@@ -266,7 +233,7 @@ app.get("/api/doctors", async (req: Request, res: Response) => {
       success: true,
       meta: {
         totalDoctors: totalMatchingDoctors,
-        totalPages,
+        totalPages: Math.ceil(totalMatchingDoctors / itemsPerPage),
         currentPage,
         limit: itemsPerPage,
       },
@@ -318,11 +285,10 @@ app.get("/api/doctors/:id", async (req: Request, res: Response) => {
     }
 
     const doctor = await doctorsCollection.findOne({ _id: new ObjectId(id) });
-    if (!doctor) {
+    if (!doctor)
       return res
         .status(404)
         .json({ success: false, message: "Profile not found" });
-    }
     if (doctor.isApproved !== true && doctor.isApproved !== "true") {
       return res
         .status(403)
@@ -338,13 +304,11 @@ app.get("/api/doctors/:id", async (req: Request, res: Response) => {
 });
 
 /* =========================================================================
-       4. BOOKING & CHECKOUT ENGINE
-       ========================================================================= */
-
+   PATIENT RESERVATION CONTROL PANEL ROUTES
+   ========================================================================= */
 app.get("/api/bookings/schedule", async (req: Request, res: Response) => {
   try {
     const { doctorId, date } = req.query;
-
     if (
       !doctorId ||
       typeof doctorId !== "string" ||
@@ -365,9 +329,9 @@ app.get("/api/bookings/schedule", async (req: Request, res: Response) => {
       .project({ appointmentTime: 1 })
       .toArray();
 
-    const disabledTimes = bookedSlots.map((b) => b.appointmentTime);
-
-    res.status(200).json({ success: true, data: disabledTimes });
+    res
+      .status(200)
+      .json({ success: true, data: bookedSlots.map((b) => b.appointmentTime) });
   } catch (error: any) {
     res.status(500).json({
       success: false,
@@ -395,25 +359,23 @@ app.post(
       if (existingBooking) {
         return res.status(409).json({
           success: false,
-          message:
-            "This slot was just booked by someone else. Please choose another time.",
+          message: "This slot was just booked by someone else.",
         });
       }
 
       const doctor = await doctorsCollection.findOne({
         _id: new ObjectId(doctorId as string),
       });
-      if (!doctor) {
+      if (!doctor)
         return res
           .status(404)
           .json({ success: false, message: "Doctor not found." });
-      }
 
       const now = new Date();
       const lockExpiration = new Date(now.getTime() + 10 * 60 * 1000);
 
       const newBookingDocument = {
-        patientUserId: patientUserId,
+        patientUserId,
         doctorId: new ObjectId(doctorId as string),
         appointmentDate,
         appointmentTime,
@@ -433,26 +395,25 @@ app.post(
 
       const insertResult =
         await bookingsCollection.insertOne(newBookingDocument);
-      const newBookingId = insertResult.insertedId.toString();
 
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
         mode: "payment",
-        customer_email: req.user?.email || undefined, // Safely handles missing emails
+        customer_email: req.user?.email || undefined,
         line_items: [
           {
             price_data: {
-              currency: "bdt", // Swap to "usd" if your live Stripe rejects bdt
+              currency: "bdt",
               product_data: {
                 name: `Consultation with ${doctor.name}`,
-                description: `${appointmentDate} @ ${appointmentTime} for ${intake.patientName}`,
+                description: `${appointmentDate} @ ${appointmentTime}`,
               },
-              unit_amount: Math.round(doctor.fee * 100), // Prevents crash from decimals
+              unit_amount: Math.round(doctor.fee * 100),
             },
             quantity: 1,
           },
         ],
-        metadata: { bookingId: newBookingId },
+        metadata: { bookingId: insertResult.insertedId.toString() },
         success_url: `${clientUrl}/booking-success?session_id={CHECKOUT_SESSION_ID}`,
         cancel_url: `${clientUrl}/doctors/${doctorId}?payment=cancelled`,
       });
@@ -461,19 +422,13 @@ app.post(
         { _id: insertResult.insertedId },
         { $set: { stripeSessionId: session.id, updatedAt: new Date() } },
       );
-
       res.status(200).json({ success: true, url: session.url });
     } catch (error: any) {
-      // Handles race condition rejection from the new unique index
-      if (error.code === 11000) {
+      if (error.code === 11000)
         return res.status(409).json({
           success: false,
-          message:
-            "This slot was just booked by someone else. Please choose another time.",
+          message: "This slot was just booked by someone else.",
         });
-      }
-
-      console.error(error);
       res.status(500).json({
         success: false,
         message: "Checkout failed",
@@ -483,7 +438,6 @@ app.post(
   },
 );
 
-// Dashboard API Endpoints for Patients
 app.get(
   "/api/patient/dashboard/overview",
   verifyToken,
@@ -491,59 +445,46 @@ app.get(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const patientUserId = req.user._id;
-
-      // 1. Get today's date as a string (assuming appointmentDate is stored as YYYY-MM-DD)
       const today = new Date();
-      // Adjusting for your timezone (Bangladesh) to ensure accurate "today" calculations
       const todayStr = new Date(
         today.getTime() - today.getTimezoneOffset() * 60000,
       )
         .toISOString()
         .split("T")[0];
 
-      // 2. Fetch all upcoming confirmed bookings
       const upcomingBookings = await bookingsCollection
         .find({
-          patientUserId: patientUserId,
+          patientUserId,
           bookingStatus: "Confirmed",
           appointmentDate: { $gte: todayStr },
         })
         .sort({ appointmentDate: 1, appointmentTime: 1 })
         .toArray();
 
-      const upcomingCount = upcomingBookings.length;
       let nextAppointment = upcomingBookings[0] || null;
-
-      // If there is a next appointment, fetch the doctor's details for the UI card
       if (nextAppointment) {
-        const doctor = await doctorsCollection.findOne(
+        nextAppointment.doctorDetails = await doctorsCollection.findOne(
           { _id: new ObjectId(nextAppointment.doctorId) },
           { projection: { name: 1, specialty: 1, location: 1, image: 1 } },
         );
-        nextAppointment.doctorDetails = doctor;
       }
 
-      // 3. Calculate total spent (Payment Status: Paid)
       const paidBookings = await bookingsCollection
-        .find({ patientUserId: patientUserId, paymentStatus: "Paid" })
+        .find({ patientUserId, paymentStatus: "Paid" })
         .project({ consultationFee: 1 })
         .toArray();
-
       const totalSpent = paidBookings.reduce(
         (sum, booking) => sum + (booking.consultationFee || 0),
         0,
       );
-
-      // 4. Count total completed consultations
       const completedCount = await bookingsCollection.countDocuments({
-        patientUserId: patientUserId,
+        patientUserId,
         bookingStatus: "Completed",
       });
 
-      // 5. Fetch Recent Activity (Last 3 appointments, either past dates or completed/cancelled)
       const recentActivity = await bookingsCollection
         .find({
-          patientUserId: patientUserId,
+          patientUserId,
           $or: [
             { bookingStatus: { $in: ["Completed", "Cancelled"] } },
             { appointmentDate: { $lt: todayStr } },
@@ -553,7 +494,6 @@ app.get(
         .limit(3)
         .toArray();
 
-      // Attach doctor names to recent activity for the UI table
       const recentActivityWithDoctors = await Promise.all(
         recentActivity.map(async (activity) => {
           const doctor = await doctorsCollection.findOne(
@@ -564,12 +504,11 @@ app.get(
         }),
       );
 
-      // 6. Send the aggregated payload
       res.status(200).json({
         success: true,
         data: {
           stats: {
-            upcomingCount,
+            upcomingCount: upcomingBookings.length,
             completedCount,
             totalSpent,
           },
@@ -578,7 +517,6 @@ app.get(
         },
       });
     } catch (error: any) {
-      console.error("Dashboard Overview Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to load dashboard data",
@@ -595,8 +533,6 @@ app.get(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const patientUserId = req.user._id;
-
-      // Get current date string (YYYY-MM-DD) for accurate future filtering
       const today = new Date();
       const todayStr = new Date(
         today.getTime() - today.getTimezoneOffset() * 60000,
@@ -604,50 +540,37 @@ app.get(
         .toISOString()
         .split("T")[0];
 
-      // Fetch upcoming appointments that are either Confirmed or actively Locked
       const appointments = await bookingsCollection
         .find({
-          patientUserId: patientUserId,
+          patientUserId,
           bookingStatus: { $in: ["Confirmed", "Locked"] },
           appointmentDate: { $gte: todayStr },
         })
         .sort({ appointmentDate: 1, appointmentTime: 1 })
         .toArray();
 
-      // Stitch doctor profile information onto each appointment payload
       const populatedAppointments = await Promise.all(
         appointments.map(async (appt) => {
           const doctor = await doctorsCollection.findOne(
             { _id: new ObjectId(appt.doctorId) },
             { projection: { name: 1, specialty: 1, image: 1, location: 1 } },
           );
-
-          // Explicitly return the spread fields alongside doctorDetails
-          return {
-            ...appt,
-            bookingStatus: appt.bookingStatus,
-            doctorDetails: doctor,
-          };
+          return { ...appt, doctorDetails: doctor };
         }),
-      );
-
-      // Separate the appointments into active vs pending channels for frontend tabs
-      const confirmed = populatedAppointments.filter(
-        (a) => a.bookingStatus === "Confirmed",
-      );
-      const pending = populatedAppointments.filter(
-        (a) => a.bookingStatus === "Locked",
       );
 
       res.status(200).json({
         success: true,
         data: {
-          confirmed,
-          pending,
+          confirmed: populatedAppointments.filter(
+            (a: any) => a.bookingStatus === "Confirmed",
+          ),
+          pending: populatedAppointments.filter(
+            (a: any) => a.bookingStatus === "Locked",
+          ),
         },
       });
     } catch (error: any) {
-      console.error("Fetch Patient Appointments Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to load appointments",
@@ -664,7 +587,6 @@ app.get(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const patientUserId = req.user._id;
-
       const today = new Date();
       const todayStr = new Date(
         today.getTime() - today.getTimezoneOffset() * 60000,
@@ -672,40 +594,29 @@ app.get(
         .toISOString()
         .split("T")[0];
 
-      // Fetch appointments that are either Completed, Cancelled, OR fall in the past
       const history = await bookingsCollection
         .find({
-          patientUserId: patientUserId,
+          patientUserId,
           $or: [
             { bookingStatus: { $in: ["Completed", "Cancelled"] } },
             { appointmentDate: { $lt: todayStr } },
           ],
         })
-        .sort({ appointmentDate: -1, appointmentTime: -1 }) // Most recent past visits first
+        .sort({ appointmentDate: -1, appointmentTime: -1 })
         .toArray();
 
-      // Stitch doctor profile information onto each history item
       const populatedHistory = await Promise.all(
         history.map(async (appt) => {
           const doctor = await doctorsCollection.findOne(
             { _id: new ObjectId(appt.doctorId) },
             { projection: { name: 1, specialty: 1, image: 1 } },
           );
-
-          return {
-            ...appt,
-            bookingStatus: appt.bookingStatus,
-            doctorDetails: doctor,
-          };
+          return { ...appt, doctorDetails: doctor };
         }),
       );
 
-      res.status(200).json({
-        success: true,
-        data: populatedHistory,
-      });
+      res.status(200).json({ success: true, data: populatedHistory });
     } catch (error: any) {
-      console.error("Fetch Patient History Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to load consultation history",
@@ -715,31 +626,106 @@ app.get(
   },
 );
 
-// Dashboard API Endpoints for Doctors
+app.get(
+  "/api/patient/profile",
+  verifyToken,
+  verifyPatient,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const extendedProfile = await profilesCollection.findOne({
+        userId: new ObjectId(req.user._id),
+      });
+      res.status(200).json({
+        success: true,
+        data: {
+          name: req.user.name,
+          email: req.user.email,
+          phone: extendedProfile?.phone || "",
+          gender: extendedProfile?.gender || "",
+          dateOfBirth: extendedProfile?.dateOfBirth || "",
+          bloodGroup: extendedProfile?.bloodGroup || "",
+          address: extendedProfile?.address || "",
+          emergencyContact: extendedProfile?.emergencyContact || "",
+        },
+      });
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        message: "Failed to load profile state",
+        error: error.message,
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/patient/profile",
+  verifyToken,
+  verifyPatient,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user._id;
+      const {
+        name,
+        phone,
+        gender,
+        dateOfBirth,
+        bloodGroup,
+        address,
+        emergencyContact,
+      } = req.body;
+
+      await usersCollection.updateOne(
+        { _id: new ObjectId(userId) },
+        { $set: { name, updatedAt: new Date() } },
+      );
+      await profilesCollection.updateOne(
+        { userId: new ObjectId(userId) },
+        {
+          $set: {
+            phone,
+            gender,
+            dateOfBirth,
+            bloodGroup,
+            address,
+            emergencyContact,
+            updatedAt: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+
+      res
+        .status(200)
+        .json({ success: true, message: "Profile synchronized successfully" });
+    } catch (error: any) {
+      res.status(500).json({
+        success: false,
+        message: "Failed to update profile changes",
+        error: error.message,
+      });
+    }
+  },
+);
+
+/* =========================================================================
+   PRACTITIONER CONTROL PANEL ROUTES
+   ========================================================================= */
 app.get(
   "/api/doctor/dashboard/overview",
   verifyToken,
   verifyDoctor,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const doctorUserId = req.user._id;
-
-      // 1. Fetch the doctor's specific public directory profile to read fees and approval state
       const doctorProfile = await doctorsCollection.findOne({
-        // Assuming your doctor profile links to the authentication user record via a userId field
-        userId: new ObjectId(doctorUserId),
+        userId: new ObjectId(req.user._id),
       });
+      if (!doctorProfile)
+        return res.status(404).json({
+          success: false,
+          message: "Doctor profile configuration not found.",
+        });
 
-      if (!doctorProfile) {
-        return res
-          .status(404)
-          .json({
-            success: false,
-            message: "Doctor profile configuration not found.",
-          });
-      }
-
-      // 2. Compute date boundaries for today (Bangladesh Timezone Synchronization)
       const today = new Date();
       const todayStr = new Date(
         today.getTime() - today.getTimezoneOffset() * 60000,
@@ -747,7 +733,6 @@ app.get(
         .toISOString()
         .split("T")[0];
 
-      // 3. Fetch all active bookings mapped to this doctor for today
       const todayBookings = await bookingsCollection
         .find({
           doctorId: doctorProfile._id,
@@ -757,22 +742,6 @@ app.get(
         .sort({ appointmentTime: 1 })
         .toArray();
 
-      // 4. Calculate metric counters out of today's snapshot payload
-      const remainingToday = todayBookings.filter(
-        (b) => b.bookingStatus === "Confirmed",
-      ).length;
-      const completedToday = todayBookings.filter(
-        (b) => b.bookingStatus === "Completed",
-      ).length;
-
-      // Calculate earnings purely from completed or confirmed paid visits today
-      const earningsToday = todayBookings
-        .filter(
-          (b) => b.bookingStatus !== "Cancelled" && b.paymentStatus === "Paid",
-        )
-        .reduce((sum, b) => sum + (b.consultationFee || 0), 0);
-
-      // 5. Package and return the structured overview payload
       res.status(200).json({
         success: true,
         data: {
@@ -780,15 +749,23 @@ app.get(
             doctorProfile.isApproved === true ||
             doctorProfile.isApproved === "true",
           stats: {
-            remainingToday,
-            completedToday,
-            earningsToday,
+            remainingToday: todayBookings.filter(
+              (b) => b.bookingStatus === "Confirmed",
+            ).length,
+            completedToday: todayBookings.filter(
+              (b) => b.bookingStatus === "Completed",
+            ).length,
+            earningsToday: todayBookings
+              .filter(
+                (b) =>
+                  b.bookingStatus !== "Cancelled" && b.paymentStatus === "Paid",
+              )
+              .reduce((sum, b) => sum + (b.consultationFee || 0), 0),
           },
           queue: todayBookings,
         },
       });
     } catch (error: any) {
-      console.error("Doctor Dashboard Overview Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to load clinical dashboard overview metrics.",
@@ -804,18 +781,11 @@ app.get(
   verifyDoctor,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const doctorUserId = req.user._id;
-
       const doctorProfile = await doctorsCollection.findOne({
-        userId: new ObjectId(doctorUserId),
+        userId: new ObjectId(req.user._id),
       });
-
-      res.status(200).json({
-        success: true,
-        data: doctorProfile,
-      });
+      res.status(200).json({ success: true, data: doctorProfile });
     } catch (error: any) {
-      console.error("Fetch Doctor Profile Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to load clinical profile metrics.",
@@ -831,7 +801,6 @@ app.post(
   verifyDoctor,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const doctorUserId = req.user._id;
       const {
         name,
         title,
@@ -846,8 +815,8 @@ app.post(
         hospitalAffiliation,
         biography,
       } = req.body;
+      const userId = new ObjectId(req.user._id);
 
-      // Build the update configuration payload securely
       const updateDoc = {
         $set: {
           name,
@@ -864,10 +833,9 @@ app.post(
           biography,
           updatedAt: new Date(),
         },
-        // These fields are ONLY applied if the profile doesn't exist yet
         $setOnInsert: {
-          userId: new ObjectId(doctorUserId),
-          isApproved: false, // Strict default for new registrations
+          userId,
+          isApproved: false,
           createdAt: new Date(),
           patientSatisfactoryScore: { averageRating: 0, totalReviewsCount: 0 },
           experienceTimeline: [],
@@ -876,19 +844,15 @@ app.post(
         },
       };
 
-      const result = await doctorsCollection.updateOne(
-        { userId: new ObjectId(doctorUserId) },
-        updateDoc,
-        { upsert: true },
-      );
-
+      const result = await doctorsCollection.updateOne({ userId }, updateDoc, {
+        upsert: true,
+      });
       res.status(200).json({
         success: true,
         message: "Profile synchronized successfully.",
         data: result,
       });
     } catch (error: any) {
-      console.error("Update Doctor Profile Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to securely update profile.",
@@ -904,42 +868,27 @@ app.put(
   verifyDoctor,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const doctorUserId = req.user._id;
       const { weeklySlots } = req.body;
-
-      // Validate that weeklySlots is provided and is an array
-      if (!Array.isArray(weeklySlots)) {
+      if (!Array.isArray(weeklySlots))
         return res.status(400).json({
           success: false,
-          message: "Invalid payload format. Expected an array of weekly slots.",
+          message: "Invalid payload format. Expected an array.",
         });
-      }
 
-      // Update ONLY the weeklySlots array for the authenticated doctor
       const result = await doctorsCollection.updateOne(
-        { userId: new ObjectId(doctorUserId) },
-        {
-          $set: {
-            weeklySlots: weeklySlots,
-            updatedAt: new Date(),
-          },
-        },
+        { userId: new ObjectId(req.user._id) },
+        { $set: { weeklySlots, updatedAt: new Date() } },
       );
-
-      if (result.matchedCount === 0) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Doctor profile not found. Please complete your profile onboarding first.",
-        });
-      }
+      if (result.matchedCount === 0)
+        return res
+          .status(404)
+          .json({ success: false, message: "Doctor profile not found." });
 
       res.status(200).json({
         success: true,
         message: "Weekly schedule updated successfully.",
       });
     } catch (error: any) {
-      console.error("Update Doctor Schedule Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to update schedule rules.",
@@ -955,20 +904,14 @@ app.get(
   verifyDoctor,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const doctorId = req.user._id;
-
-      // Calculate the start of the current month (e.g., July 1, 2026)
       const now = new Date();
       const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
       const earningsData = await bookingsCollection
         .aggregate([
-          {
-            $match: { doctorId: new ObjectId(doctorId) },
-          },
+          { $match: { doctorId: new ObjectId(req.user._id) } },
           {
             $facet: {
-              // Pipeline 1: Calculate high-level financial metrics
               metrics: [
                 {
                   $group: {
@@ -1013,7 +956,6 @@ app.get(
                   },
                 },
               ],
-              // Pipeline 2: Fetch the most recent 20 transactions for the ledger
               recentTransactions: [
                 { $sort: { createdAt: -1 } },
                 { $limit: 20 },
@@ -1033,26 +975,20 @@ app.get(
         ])
         .toArray();
 
-      // Extract from the facet structure or provide safe zero-defaults
       const result = earningsData[0];
-      const metrics = result?.metrics?.[0] || {
-        totalEarned: 0,
-        pendingAmount: 0,
-        totalPaidAppointments: 0,
-        thisMonthEarned: 0,
-      };
-
-      const transactions = result?.recentTransactions || [];
-
       res.status(200).json({
         success: true,
         data: {
-          metrics,
-          transactions,
+          metrics: result?.metrics?.[0] || {
+            totalEarned: 0,
+            pendingAmount: 0,
+            totalPaidAppointments: 0,
+            thisMonthEarned: 0,
+          },
+          transactions: result?.recentTransactions || [],
         },
       });
     } catch (error: any) {
-      console.error("Fetch Doctor Earnings Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to generate financial report.",
@@ -1062,28 +998,25 @@ app.get(
   },
 );
 
-// Dashboard API Endpoints for Admins
+/* =========================================================================
+   ADMINISTRATIVE PLATFORM MANAGEMENT CONTROL ROUTES
+   ========================================================================= */
 app.get(
   "/api/admin/overview",
   verifyToken,
   verifyAdmin,
   async (req: AuthenticatedRequest, res: Response) => {
     try {
-      // 1. Time constraints for calculations
       const now = new Date();
       const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
-
-      // Define your platform's profit cut (e.g., 10%)
       const PLATFORM_COMMISSION_RATE = 0.1;
 
-      // 2. Execute all queries concurrently for maximum speed
       const [usersCount, doctorsCount, financialData, specialtyData] =
         await Promise.all([
           usersCollection.estimatedDocumentCount(),
           doctorsCollection.countDocuments({ isApproved: true }),
 
-          // 3. Financial & Trend Aggregation
           bookingsCollection
             .aggregate([
               { $match: { paymentStatus: "Paid" } },
@@ -1124,13 +1057,12 @@ app.get(
             ])
             .toArray(),
 
-          // 4. Specialty Appointments Aggregation (Requires Lookup)
           bookingsCollection
             .aggregate([
               { $match: { paymentStatus: "Paid" } },
               {
                 $lookup: {
-                  from: "doctors", // Ensure this matches your actual MongoDB collection name
+                  from: "doctors",
                   localField: "doctorId",
                   foreignField: "_id",
                   as: "doctorDetails",
@@ -1144,17 +1076,14 @@ app.get(
                 },
               },
               { $sort: { appointments: -1 } },
-              { $limit: 5 }, // Top 5 specialties
+              { $limit: 5 },
             ])
             .toArray(),
         ]);
 
-      // 5. Format Data for the Frontend
       const financials = financialData[0];
       const totalVolume = financials?.totals[0]?.totalVolume || 0;
       const monthlyVolume = financials?.totals[0]?.monthlyVolume || 0;
-
-      // Map month numbers to short names for Recharts
       const monthNames = [
         "Jan",
         "Feb",
@@ -1170,18 +1099,6 @@ app.get(
         "Dec",
       ];
 
-      const formattedTrend =
-        financials?.monthlyTrend.map((item: any) => ({
-          name: monthNames[item._id.month - 1],
-          revenue: item.revenue * PLATFORM_COMMISSION_RATE,
-        })) || [];
-
-      const formattedSpecialties = specialtyData.map((item: any) => ({
-        name: item._id || "Unknown",
-        appointments: item.appointments,
-      }));
-
-      // 6. Send Response
       res.status(200).json({
         success: true,
         data: {
@@ -1192,13 +1109,19 @@ app.get(
             totalUsers: usersCount,
           },
           charts: {
-            revenueTrend: formattedTrend,
-            specialtyDistribution: formattedSpecialties,
+            revenueTrend:
+              financials?.monthlyTrend.map((item: any) => ({
+                name: monthNames[item._id.month - 1],
+                revenue: item.revenue * PLATFORM_COMMISSION_RATE,
+              })) || [],
+            specialtyDistribution: specialtyData.map((item: any) => ({
+              name: item._id || "Unknown",
+              appointments: item.appointments,
+            })),
           },
         },
       });
     } catch (error: any) {
-      console.error("Admin Overview Aggregation Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to generate admin overview.",
@@ -1225,33 +1148,16 @@ app.get(
             },
           },
           {
-            $unwind: {
-              path: "$userDetails",
-              preserveNullAndEmptyArrays: true,
-            },
+            $unwind: { path: "$userDetails", preserveNullAndEmptyArrays: true },
           },
-          {
-            $addFields: {
-              email: "$userDetails.email",
-            },
-          },
-          {
-            $project: {
-              userDetails: 0, 
-            },
-          },
-          {
-            $sort: { createdAt: -1 },
-          },
+          { $addFields: { email: "$userDetails.email" } },
+          { $project: { userDetails: 0 } },
+          { $sort: { createdAt: -1 } },
         ])
         .toArray();
 
-      res.status(200).json({
-        success: true,
-        data: doctors,
-      });
+      res.status(200).json({ success: true, data: doctors });
     } catch (error: any) {
-      console.error("Admin Fetch Doctors Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to fetch doctors list.",
@@ -1269,48 +1175,36 @@ app.patch(
     try {
       const doctorId = req.params.id;
       const { action } = req.body;
-
-      if (!ObjectId.isValid(doctorId as string)) {
+      if (!ObjectId.isValid(doctorId as string))
         return res
           .status(400)
           .json({ success: false, message: "Invalid Doctor ID" });
-      }
 
       let updateFields = {};
-
-      switch (action) {
-        case "approve":
-          updateFields = { isApproved: true, status: "Approved" };
-          break;
-        case "reject":
-          updateFields = { isApproved: false, status: "Rejected" };
-          break;
-        case "suspend":
-          updateFields = { isApproved: false, status: "Suspended" };
-          break;
-        default:
-          return res
-            .status(400)
-            .json({ success: false, message: "Invalid action" });
-      }
+      if (action === "approve")
+        updateFields = { isApproved: true, status: "Approved" };
+      else if (action === "reject")
+        updateFields = { isApproved: false, status: "Rejected" };
+      else if (action === "suspend")
+        updateFields = { isApproved: false, status: "Suspended" };
+      else
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid action" });
 
       const result = await doctorsCollection.updateOne(
         { _id: new ObjectId(doctorId as string) },
         { $set: updateFields },
       );
-
-      if (result.matchedCount === 0) {
+      if (result.matchedCount === 0)
         return res
           .status(404)
           .json({ success: false, message: "Doctor not found" });
-      }
 
-      res.status(200).json({
-        success: true,
-        message: `Doctor successfully ${action}d.`,
-      });
+      res
+        .status(200)
+        .json({ success: true, message: `Doctor successfully ${action}d.` });
     } catch (error: any) {
-      console.error("Admin Update Doctor Status Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to update doctor status.",
@@ -1329,84 +1223,115 @@ app.get(
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const skip = (page - 1) * limit;
-      const statusFilter = req.query.status as string; 
+      const statusFilter = req.query.status as string;
       const searchQuery = req.query.search as string;
 
       const matchStage: any = {};
-      if (statusFilter && statusFilter !== "All") {
+      if (statusFilter && statusFilter !== "All")
         matchStage.paymentStatus = statusFilter;
-      }
 
-      const aggregationResult = await bookingsCollection.aggregate([
-        { $match: matchStage },
-        {
-          $lookup: {
-            from: "doctors",
-            localField: "doctorId", 
-            foreignField: "_id",
-            as: "doctorInfo"
-          }
-        },
-        { $unwind: { path: "$doctorInfo", preserveNullAndEmptyArrays: true } },
-
-        ...(searchQuery 
-          ? [{
-              $match: {
-                $or: [
-                  { "patientDetails.patientName": { $regex: searchQuery, $options: "i" } },
-                  { "doctorInfo.name": { $regex: searchQuery, $options: "i" } },
-                  { "doctorInfo.specialty": { $regex: searchQuery, $options: "i" } }
-                ]
-              }
-            }]
-          : []
-        ),
-
-        {
-          $facet: {
-            metaSummary: [
-              {
-                $group: {
-                  _id: null,
-                  totalRecords: { $sum: 1 },
-                  grossVolume: {
-                    $sum: { $cond: [{ $eq: ["$paymentStatus", "Paid"] }, "$consultationFee", 0] }
+      const aggregationResult = await bookingsCollection
+        .aggregate([
+          { $match: matchStage },
+          {
+            $lookup: {
+              from: "doctors",
+              localField: "doctorId",
+              foreignField: "_id",
+              as: "doctorInfo",
+            },
+          },
+          {
+            $unwind: { path: "$doctorInfo", preserveNullAndEmptyArrays: true },
+          },
+          ...(searchQuery
+            ? [
+                {
+                  $match: {
+                    $or: [
+                      {
+                        "patientDetails.patientName": {
+                          $regex: searchQuery,
+                          $options: "i",
+                        },
+                      },
+                      {
+                        "doctorInfo.name": {
+                          $regex: searchQuery,
+                          $options: "i",
+                        },
+                      },
+                      {
+                        "doctorInfo.specialty": {
+                          $regex: searchQuery,
+                          $options: "i",
+                        },
+                      },
+                    ],
                   },
-                  completedCount: {
-                    $sum: { $cond: [{ $eq: ["$bookingStatus", "Completed"] }, 1, 0] }
+                },
+              ]
+            : []),
+          {
+            $facet: {
+              metaSummary: [
+                {
+                  $group: {
+                    _id: null,
+                    totalRecords: { $sum: 1 },
+                    grossVolume: {
+                      $sum: {
+                        $cond: [
+                          { $eq: ["$paymentStatus", "Paid"] },
+                          "$consultationFee",
+                          0,
+                        ],
+                      },
+                    },
+                    completedCount: {
+                      $sum: {
+                        $cond: [{ $eq: ["$bookingStatus", "Completed"] }, 1, 0],
+                      },
+                    },
+                    pendingPaymentCount: {
+                      $sum: {
+                        $cond: [{ $eq: ["$paymentStatus", "Pending"] }, 1, 0],
+                      },
+                    },
                   },
-                  pendingPaymentCount: {
-                    $sum: { $cond: [{ $eq: ["$paymentStatus", "Pending"] }, 1, 0] }
-                  }
-                }
-              }
-            ],
-            recordsData: [
-              { $sort: { createdAt: -1 } },
-              { $skip: skip },
-              { $limit: limit },
-              {
-                $project: {
-                  _id: 1,
-                  appointmentDate: 1,
-                  appointmentTime: 1,
-                  consultationFee: 1,
-                  paymentStatus: 1,
-                  appointmentStatus: "$bookingStatus",
-                  createdAt: 1,
-                  patientName: "$patientDetails.patientName",
-                  doctorName: "$doctorInfo.name",
-                  doctorSpecialty: "$doctorInfo.specialty"
-                }
-              }
-            ]
-          }
-        }
-      ]).toArray();
+                },
+              ],
+              recordsData: [
+                { $sort: { createdAt: -1 } },
+                { $skip: skip },
+                { $limit: limit },
+                {
+                  $project: {
+                    _id: 1,
+                    appointmentDate: 1,
+                    appointmentTime: 1,
+                    consultationFee: 1,
+                    paymentStatus: 1,
+                    appointmentStatus: "$bookingStatus",
+                    createdAt: 1,
+                    patientName: "$patientDetails.patientName",
+                    doctorName: "$doctorInfo.name",
+                    doctorSpecialty: "$doctorInfo.specialty",
+                  },
+                },
+              ],
+            },
+          },
+        ])
+        .toArray();
 
       const facetData = aggregationResult[0];
-      const stats = facetData?.metaSummary[0] || { totalRecords: 0, grossVolume: 0, completedCount: 0, pendingPaymentCount: 0 };
-      const bookingsList = facetData?.recordsData || [];
+      const stats = facetData?.metaSummary[0] || {
+        totalRecords: 0,
+        grossVolume: 0,
+        completedCount: 0,
+        pendingPaymentCount: 0,
+      };
 
       res.status(200).json({
         success: true,
@@ -1414,69 +1339,26 @@ app.get(
           totalAppointments: stats.totalRecords,
           grossVolume: stats.grossVolume,
           completedCount: stats.completedCount,
-          pendingPaymentCount: stats.pendingPaymentCount
+          pendingPaymentCount: stats.pendingPaymentCount,
         },
         pagination: {
           currentPage: page,
-          limit: limit,
+          limit,
           totalPages: Math.ceil(stats.totalRecords / limit) || 1,
-          totalResults: stats.totalRecords
+          totalResults: stats.totalRecords,
         },
-        data: bookingsList
+        data: facetData?.recordsData || [],
       });
-
     } catch (error: any) {
-      console.error("Global Bookings Compiling Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to compile the system bookings ledger.",
-        error: error.message
+        error: error.message,
       });
-    }
-  }
-);
-
-app.get(
-  "/api/patient/profile",
-  verifyToken,
-  verifyPatient,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const userId = req.user._id;
-
-      // Find extended profile information if it exists
-      const extendedProfile = await profilesCollection.findOne({
-        userId: new ObjectId(userId),
-      });
-
-      // Combine BetterAuth core user data with our extended medical data
-      res.status(200).json({
-        success: true,
-        data: {
-          name: req.user.name,
-          email: req.user.email,
-          phone: extendedProfile?.phone || "",
-          gender: extendedProfile?.gender || "",
-          dateOfBirth: extendedProfile?.dateOfBirth || "",
-          bloodGroup: extendedProfile?.bloodGroup || "",
-          address: extendedProfile?.address || "",
-          emergencyContact: extendedProfile?.emergencyContact || "",
-        },
-      });
-    } catch (error: any) {
-      console.error("Fetch Profile Error:", error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: "Failed to load profile state",
-          error: error.message,
-        });
     }
   },
 );
 
-// 1. GET: Fetch, filter, and search all website users
 app.get(
   "/api/admin/users",
   verifyToken,
@@ -1486,73 +1368,66 @@ app.get(
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 10;
       const skip = (page - 1) * limit;
-      const roleFilter = req.query.role as string; // Expects "All", "patient", "doctor", "admin"
+      const roleFilter = req.query.role as string;
       const searchQuery = req.query.search as string;
 
-      // Build dynamic match stage based on role and text search queries
       const matchStage: any = {};
-
-      if (roleFilter && roleFilter !== "All") {
+      if (roleFilter && roleFilter !== "All")
         matchStage.role = roleFilter.toLowerCase();
-      }
-
-      if (searchQuery) {
+      if (searchQuery)
         matchStage.$or = [
           { name: { $regex: searchQuery, $options: "i" } },
-          { email: { $regex: searchQuery, $options: "i" } }
+          { email: { $regex: searchQuery, $options: "i" } },
         ];
-      }
 
-      // Query database concurrently using a facet layout
-      const aggregationResult = await usersCollection.aggregate([
-        { $match: matchStage },
-        {
-          $facet: {
-            metaSummary: [{ $count: "totalRecords" }],
-            recordsData: [
-              { $sort: { createdAt: -1 } },
-              { $skip: skip },
-              { $limit: limit },
-              {
-                $project: {
-                  _id: 1,
-                  name: 1,
-                  email: 1,
-                  role: 1,
-                  createdAt: 1
-                }
-              }
-            ]
-          }
-        }
-      ]).toArray();
+      const aggregationResult = await usersCollection
+        .aggregate([
+          { $match: matchStage },
+          {
+            $facet: {
+              metaSummary: [{ $count: "totalRecords" }],
+              recordsData: [
+                { $sort: { createdAt: -1 } },
+                { $skip: skip },
+                { $limit: limit },
+                {
+                  $project: {
+                    _id: 1,
+                    name: 1,
+                    email: 1,
+                    role: 1,
+                    createdAt: 1,
+                  },
+                },
+              ],
+            },
+          },
+        ])
+        .toArray();
 
       const facetData = aggregationResult[0];
       const totalResults = facetData?.metaSummary[0]?.totalRecords || 0;
-      const usersList = facetData?.recordsData || [];
 
       res.status(200).json({
         success: true,
         pagination: {
           currentPage: page,
-          limit: limit,
+          limit,
           totalPages: Math.ceil(totalResults / limit) || 1,
-          totalResults
+          totalResults,
         },
-        data: usersList
+        data: facetData?.recordsData || [],
       });
     } catch (error: any) {
-      console.error("Admin Fetch Users Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to fetch platform users list.",
-        error: error.message
+        error: error.message,
       });
     }
-  }
+  },
 );
 
-// 2. PATCH: Promote or Demote user administrative credentials
 app.patch(
   "/api/admin/users/:id/role",
   verifyToken,
@@ -1560,101 +1435,48 @@ app.patch(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const targetUserId = req.params.id;
-      const { targetRole } = req.body; // Expects "admin" or "patient" (demoted base state)
+      const { targetRole } = req.body;
 
-      if (!ObjectId.isValid(targetUserId as string)) {
-        return res.status(400).json({ success: false, message: "Invalid User ID format." });
-      }
+      if (!ObjectId.isValid(targetUserId as string))
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid User ID format." });
+      if (targetRole !== "admin" && targetRole !== "patient")
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid role assignment." });
 
-      if (targetRole !== "admin" && targetRole !== "patient") {
-        return res.status(400).json({ success: false, message: "Invalid role operation assignment." });
-      }
-
-      // CRITICAL SECURITY GUARDRAIL: Prevent active admin from accidentally locking themselves out
-      if (req.user?._id && req.user._id.toString() === targetUserId && targetRole !== "admin") {
-        return res.status(403).json({ 
-          success: false, 
-          message: "Security violation: You cannot revoke your own administrative clearance." 
+      if (
+        req.user?._id &&
+        req.user._id.toString() === targetUserId &&
+        targetRole !== "admin"
+      ) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Security violation: You cannot revoke your own administrative clearance.",
         });
       }
 
       const result = await usersCollection.updateOne(
         { _id: new ObjectId(targetUserId as string) },
-        { $set: { role: targetRole } }
+        { $set: { role: targetRole } },
       );
-
-      if (result.matchedCount === 0) {
-        return res.status(404).json({ success: false, message: "Target user account not found." });
-      }
+      if (result.matchedCount === 0)
+        return res
+          .status(404)
+          .json({ success: false, message: "Target user account not found." });
 
       res.status(200).json({
         success: true,
-        message: `User account role successfully modified to ${targetRole}.`
+        message: `User account role successfully modified to ${targetRole}.`,
       });
     } catch (error: any) {
-      console.error("Admin Modify User Role Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to process role adjustment request.",
-        error: error.message
+        error: error.message,
       });
-    }
-  }
-);
-
-// 2. UPDATE / UPSERT PATIENT PROFILE DATA
-app.post(
-  "/api/patient/profile",
-  verifyToken,
-  verifyPatient,
-  async (req: AuthenticatedRequest, res: Response) => {
-    try {
-      const userId = req.user._id;
-      const {
-        name,
-        phone,
-        gender,
-        dateOfBirth,
-        bloodGroup,
-        address,
-        emergencyContact,
-      } = req.body;
-
-      // Update core user display name in BetterAuth users collection
-      await usersCollection.updateOne(
-        { _id: new ObjectId(userId) },
-        { $set: { name, updatedAt: new Date() } },
-      );
-
-      // Upsert extended details inside our custom profiles collection
-      await profilesCollection.updateOne(
-        { userId: new ObjectId(userId) },
-        {
-          $set: {
-            phone,
-            gender,
-            dateOfBirth,
-            bloodGroup,
-            address,
-            emergencyContact,
-            updatedAt: new Date(),
-          },
-        },
-        { upsert: true }, // Creates the document if it doesn't exist yet
-      );
-
-      res
-        .status(200)
-        .json({ success: true, message: "Profile synchronized successfully" });
-    } catch (error: any) {
-      console.error("Update Profile Error:", error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: "Failed to update profile changes",
-          error: error.message,
-        });
     }
   },
 );
