@@ -21,9 +21,11 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
 
 // Universal Middleware Layout - Locked down to your specific frontend URL
-app.use(cors({
-  origin: clientUrl
-}));
+app.use(
+  cors({
+    origin: clientUrl,
+  }),
+);
 
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET as string;
 
@@ -99,7 +101,7 @@ let database: Db;
 let sessionsCollection: Collection;
 let usersCollection: Collection;
 let doctorsCollection: Collection;
-let bookingsCollection: Collection; 
+let bookingsCollection: Collection;
 let profilesCollection: Collection;
 
 async function bootstrapServer() {
@@ -112,7 +114,7 @@ async function bootstrapServer() {
     sessionsCollection = database.collection("session");
     usersCollection = database.collection("user");
     doctorsCollection = database.collection("doctors");
-    bookingsCollection = database.collection("bookings"); 
+    bookingsCollection = database.collection("bookings");
     profilesCollection = database.collection("profiles");
 
     await profilesCollection.createIndex({ userId: 1 }, { unique: true });
@@ -128,7 +130,7 @@ async function bootstrapServer() {
     // 2. Strict Unique Index to prevent millisecond race-condition double bookings
     await bookingsCollection.createIndex(
       { doctorId: 1, appointmentDate: 1, appointmentTime: 1 },
-      { unique: true }
+      { unique: true },
     );
     console.log("🔒 Unique constraint index established on bookingsCollection");
 
@@ -271,13 +273,11 @@ app.get("/api/doctors", async (req: Request, res: Response) => {
       data: doctors,
     });
   } catch (error: any) {
-    res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to parse directory",
-        error: error.message,
-      });
+    res.status(500).json({
+      success: false,
+      message: "Failed to parse directory",
+      error: error.message,
+    });
   }
 });
 
@@ -300,13 +300,11 @@ app.get("/api/doctors/specialties", async (req: Request, res: Response) => {
 
     res.status(200).json({ success: true, data: cleanSpecialties });
   } catch (error: any) {
-    res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to compile specialty registry",
-        error: error.message,
-      });
+    res.status(500).json({
+      success: false,
+      message: "Failed to compile specialty registry",
+      error: error.message,
+    });
   }
 });
 
@@ -371,13 +369,11 @@ app.get("/api/bookings/schedule", async (req: Request, res: Response) => {
 
     res.status(200).json({ success: true, data: disabledTimes });
   } catch (error: any) {
-    res
-      .status(500)
-      .json({
-        success: false,
-        message: "Failed to fetch schedule",
-        error: error.message,
-      });
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch schedule",
+      error: error.message,
+    });
   }
 });
 
@@ -417,7 +413,7 @@ app.post(
       const lockExpiration = new Date(now.getTime() + 10 * 60 * 1000);
 
       const newBookingDocument = {
-        patientUserId: patientUserId, 
+        patientUserId: patientUserId,
         doctorId: new ObjectId(doctorId as string),
         appointmentDate,
         appointmentTime,
@@ -472,18 +468,17 @@ app.post(
       if (error.code === 11000) {
         return res.status(409).json({
           success: false,
-          message: "This slot was just booked by someone else. Please choose another time.",
+          message:
+            "This slot was just booked by someone else. Please choose another time.",
         });
       }
 
       console.error(error);
-      res
-        .status(500)
-        .json({
-          success: false,
-          message: "Checkout failed",
-          error: error.message,
-        });
+      res.status(500).json({
+        success: false,
+        message: "Checkout failed",
+        error: error.message,
+      });
     }
   },
 );
@@ -500,7 +495,11 @@ app.get(
       // 1. Get today's date as a string (assuming appointmentDate is stored as YYYY-MM-DD)
       const today = new Date();
       // Adjusting for your timezone (Bangladesh) to ensure accurate "today" calculations
-      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+      const todayStr = new Date(
+        today.getTime() - today.getTimezoneOffset() * 60000,
+      )
+        .toISOString()
+        .split("T")[0];
 
       // 2. Fetch all upcoming confirmed bookings
       const upcomingBookings = await bookingsCollection
@@ -519,7 +518,7 @@ app.get(
       if (nextAppointment) {
         const doctor = await doctorsCollection.findOne(
           { _id: new ObjectId(nextAppointment.doctorId) },
-          { projection: { name: 1, specialty: 1, location: 1, image: 1 } }
+          { projection: { name: 1, specialty: 1, location: 1, image: 1 } },
         );
         nextAppointment.doctorDetails = doctor;
       }
@@ -529,8 +528,11 @@ app.get(
         .find({ patientUserId: patientUserId, paymentStatus: "Paid" })
         .project({ consultationFee: 1 })
         .toArray();
-      
-      const totalSpent = paidBookings.reduce((sum, booking) => sum + (booking.consultationFee || 0), 0);
+
+      const totalSpent = paidBookings.reduce(
+        (sum, booking) => sum + (booking.consultationFee || 0),
+        0,
+      );
 
       // 4. Count total completed consultations
       const completedCount = await bookingsCollection.countDocuments({
@@ -544,8 +546,8 @@ app.get(
           patientUserId: patientUserId,
           $or: [
             { bookingStatus: { $in: ["Completed", "Cancelled"] } },
-            { appointmentDate: { $lt: todayStr } }
-          ]
+            { appointmentDate: { $lt: todayStr } },
+          ],
         })
         .sort({ appointmentDate: -1, createdAt: -1 })
         .limit(3)
@@ -556,10 +558,10 @@ app.get(
         recentActivity.map(async (activity) => {
           const doctor = await doctorsCollection.findOne(
             { _id: new ObjectId(activity.doctorId) },
-            { projection: { name: 1, specialty: 1 } }
+            { projection: { name: 1, specialty: 1 } },
           );
           return { ...activity, doctorDetails: doctor };
-        })
+        }),
       );
 
       // 6. Send the aggregated payload
@@ -583,7 +585,7 @@ app.get(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 app.get(
@@ -596,7 +598,11 @@ app.get(
 
       // Get current date string (YYYY-MM-DD) for accurate future filtering
       const today = new Date();
-      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+      const todayStr = new Date(
+        today.getTime() - today.getTimezoneOffset() * 60000,
+      )
+        .toISOString()
+        .split("T")[0];
 
       // Fetch upcoming appointments that are either Confirmed or actively Locked
       const appointments = await bookingsCollection
@@ -613,28 +619,32 @@ app.get(
         appointments.map(async (appt) => {
           const doctor = await doctorsCollection.findOne(
             { _id: new ObjectId(appt.doctorId) },
-            { projection: { name: 1, specialty: 1, image: 1, location: 1 } }
+            { projection: { name: 1, specialty: 1, image: 1, location: 1 } },
           );
-          
+
           // Explicitly return the spread fields alongside doctorDetails
           return {
             ...appt,
             bookingStatus: appt.bookingStatus,
-            doctorDetails: doctor
+            doctorDetails: doctor,
           };
-        })
+        }),
       );
 
       // Separate the appointments into active vs pending channels for frontend tabs
-      const confirmed = populatedAppointments.filter(a => a.bookingStatus === "Confirmed");
-      const pending = populatedAppointments.filter(a => a.bookingStatus === "Locked");
+      const confirmed = populatedAppointments.filter(
+        (a) => a.bookingStatus === "Confirmed",
+      );
+      const pending = populatedAppointments.filter(
+        (a) => a.bookingStatus === "Locked",
+      );
 
       res.status(200).json({
         success: true,
         data: {
           confirmed,
-          pending
-        }
+          pending,
+        },
       });
     } catch (error: any) {
       console.error("Fetch Patient Appointments Error:", error);
@@ -644,7 +654,7 @@ app.get(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 app.get(
@@ -656,7 +666,11 @@ app.get(
       const patientUserId = req.user._id;
 
       const today = new Date();
-      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+      const todayStr = new Date(
+        today.getTime() - today.getTimezoneOffset() * 60000,
+      )
+        .toISOString()
+        .split("T")[0];
 
       // Fetch appointments that are either Completed, Cancelled, OR fall in the past
       const history = await bookingsCollection
@@ -664,8 +678,8 @@ app.get(
           patientUserId: patientUserId,
           $or: [
             { bookingStatus: { $in: ["Completed", "Cancelled"] } },
-            { appointmentDate: { $lt: todayStr } }
-          ]
+            { appointmentDate: { $lt: todayStr } },
+          ],
         })
         .sort({ appointmentDate: -1, appointmentTime: -1 }) // Most recent past visits first
         .toArray();
@@ -675,20 +689,20 @@ app.get(
         history.map(async (appt) => {
           const doctor = await doctorsCollection.findOne(
             { _id: new ObjectId(appt.doctorId) },
-            { projection: { name: 1, specialty: 1, image: 1 } }
+            { projection: { name: 1, specialty: 1, image: 1 } },
           );
-          
+
           return {
             ...appt,
             bookingStatus: appt.bookingStatus,
-            doctorDetails: doctor
+            doctorDetails: doctor,
           };
-        })
+        }),
       );
 
       res.status(200).json({
         success: true,
-        data: populatedHistory
+        data: populatedHistory,
       });
     } catch (error: any) {
       console.error("Fetch Patient History Error:", error);
@@ -698,7 +712,7 @@ app.get(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 // Dashboard API Endpoints for Doctors
@@ -717,37 +731,54 @@ app.get(
       });
 
       if (!doctorProfile) {
-        return res.status(404).json({ success: false, message: "Doctor profile configuration not found." });
+        return res
+          .status(404)
+          .json({
+            success: false,
+            message: "Doctor profile configuration not found.",
+          });
       }
 
       // 2. Compute date boundaries for today (Bangladesh Timezone Synchronization)
       const today = new Date();
-      const todayStr = new Date(today.getTime() - (today.getTimezoneOffset() * 60000)).toISOString().split("T")[0];
+      const todayStr = new Date(
+        today.getTime() - today.getTimezoneOffset() * 60000,
+      )
+        .toISOString()
+        .split("T")[0];
 
       // 3. Fetch all active bookings mapped to this doctor for today
       const todayBookings = await bookingsCollection
         .find({
           doctorId: doctorProfile._id,
           appointmentDate: todayStr,
-          bookingStatus: { $in: ["Confirmed", "Completed", "Cancelled"] }
+          bookingStatus: { $in: ["Confirmed", "Completed", "Cancelled"] },
         })
         .sort({ appointmentTime: 1 })
         .toArray();
 
       // 4. Calculate metric counters out of today's snapshot payload
-      const remainingToday = todayBookings.filter(b => b.bookingStatus === "Confirmed").length;
-      const completedToday = todayBookings.filter(b => b.bookingStatus === "Completed").length;
-      
+      const remainingToday = todayBookings.filter(
+        (b) => b.bookingStatus === "Confirmed",
+      ).length;
+      const completedToday = todayBookings.filter(
+        (b) => b.bookingStatus === "Completed",
+      ).length;
+
       // Calculate earnings purely from completed or confirmed paid visits today
       const earningsToday = todayBookings
-        .filter(b => b.bookingStatus !== "Cancelled" && b.paymentStatus === "Paid")
+        .filter(
+          (b) => b.bookingStatus !== "Cancelled" && b.paymentStatus === "Paid",
+        )
         .reduce((sum, b) => sum + (b.consultationFee || 0), 0);
 
       // 5. Package and return the structured overview payload
       res.status(200).json({
         success: true,
         data: {
-          isApproved: doctorProfile.isApproved === true || doctorProfile.isApproved === "true",
+          isApproved:
+            doctorProfile.isApproved === true ||
+            doctorProfile.isApproved === "true",
           stats: {
             remainingToday,
             completedToday,
@@ -764,7 +795,7 @@ app.get(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 app.get(
@@ -791,7 +822,7 @@ app.get(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 app.post(
@@ -848,7 +879,7 @@ app.post(
       const result = await doctorsCollection.updateOne(
         { userId: new ObjectId(doctorUserId) },
         updateDoc,
-        { upsert: true }
+        { upsert: true },
       );
 
       res.status(200).json({
@@ -864,7 +895,7 @@ app.post(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 app.put(
@@ -892,13 +923,14 @@ app.put(
             weeklySlots: weeklySlots,
             updatedAt: new Date(),
           },
-        }
+        },
       );
 
       if (result.matchedCount === 0) {
         return res.status(404).json({
           success: false,
-          message: "Doctor profile not found. Please complete your profile onboarding first.",
+          message:
+            "Doctor profile not found. Please complete your profile onboarding first.",
         });
       }
 
@@ -914,7 +946,7 @@ app.put(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 app.get(
@@ -943,12 +975,20 @@ app.get(
                     _id: null,
                     totalEarned: {
                       $sum: {
-                        $cond: [{ $eq: ["$paymentStatus", "Paid"] }, "$consultationFee", 0],
+                        $cond: [
+                          { $eq: ["$paymentStatus", "Paid"] },
+                          "$consultationFee",
+                          0,
+                        ],
                       },
                     },
                     pendingAmount: {
                       $sum: {
-                        $cond: [{ $ne: ["$paymentStatus", "Paid"] }, "$consultationFee", 0],
+                        $cond: [
+                          { $ne: ["$paymentStatus", "Paid"] },
+                          "$consultationFee",
+                          0,
+                        ],
                       },
                     },
                     totalPaidAppointments: {
@@ -1001,7 +1041,7 @@ app.get(
         totalPaidAppointments: 0,
         thisMonthEarned: 0,
       };
-      
+
       const transactions = result?.recentTransactions || [];
 
       res.status(200).json({
@@ -1019,7 +1059,7 @@ app.get(
         error: error.message,
       });
     }
-  }
+  },
 );
 
 // Dashboard API Endpoints for Admins
@@ -1035,67 +1075,79 @@ app.get(
       const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
 
       // Define your platform's profit cut (e.g., 10%)
-      const PLATFORM_COMMISSION_RATE = 0.10; 
+      const PLATFORM_COMMISSION_RATE = 0.1;
 
       // 2. Execute all queries concurrently for maximum speed
-      const [usersCount, doctorsCount, financialData, specialtyData] = await Promise.all([
-        usersCollection.estimatedDocumentCount(),
-        doctorsCollection.countDocuments({ isApproved: true }),
-        
-        // 3. Financial & Trend Aggregation
-        bookingsCollection.aggregate([
-          { $match: { paymentStatus: "Paid" } },
-          {
-            $facet: {
-              totals: [
-                {
-                  $group: {
-                    _id: null,
-                    totalVolume: { $sum: "$consultationFee" },
-                    monthlyVolume: {
-                      $sum: {
-                        $cond: [{ $gte: ["$createdAt", firstDayOfMonth] }, "$consultationFee", 0]
-                      }
-                    }
-                  }
-                }
-              ],
-              monthlyTrend: [
-                { $match: { createdAt: { $gte: sixMonthsAgo } } },
-                {
-                  $group: {
-                    _id: { month: { $month: "$createdAt" }, year: { $year: "$createdAt" } },
-                    revenue: { $sum: "$consultationFee" }
-                  }
-                },
-                { $sort: { "_id.year": 1, "_id.month": 1 } }
-              ]
-            }
-          }
-        ]).toArray(),
+      const [usersCount, doctorsCount, financialData, specialtyData] =
+        await Promise.all([
+          usersCollection.estimatedDocumentCount(),
+          doctorsCollection.countDocuments({ isApproved: true }),
 
-        // 4. Specialty Appointments Aggregation (Requires Lookup)
-        bookingsCollection.aggregate([
-          { $match: { paymentStatus: "Paid" } },
-          {
-            $lookup: {
-              from: "doctors", // Ensure this matches your actual MongoDB collection name
-              localField: "doctorId",
-              foreignField: "_id",
-              as: "doctorDetails"
-            }
-          },
-          { $unwind: "$doctorDetails" },
-          {
-            $group: {
-              _id: "$doctorDetails.specialty",
-              appointments: { $sum: 1 }
-            }
-          },
-          { $sort: { appointments: -1 } },
-          { $limit: 5 } // Top 5 specialties
-        ]).toArray()
-      ]);
+          // 3. Financial & Trend Aggregation
+          bookingsCollection
+            .aggregate([
+              { $match: { paymentStatus: "Paid" } },
+              {
+                $facet: {
+                  totals: [
+                    {
+                      $group: {
+                        _id: null,
+                        totalVolume: { $sum: "$consultationFee" },
+                        monthlyVolume: {
+                          $sum: {
+                            $cond: [
+                              { $gte: ["$createdAt", firstDayOfMonth] },
+                              "$consultationFee",
+                              0,
+                            ],
+                          },
+                        },
+                      },
+                    },
+                  ],
+                  monthlyTrend: [
+                    { $match: { createdAt: { $gte: sixMonthsAgo } } },
+                    {
+                      $group: {
+                        _id: {
+                          month: { $month: "$createdAt" },
+                          year: { $year: "$createdAt" },
+                        },
+                        revenue: { $sum: "$consultationFee" },
+                      },
+                    },
+                    { $sort: { "_id.year": 1, "_id.month": 1 } },
+                  ],
+                },
+              },
+            ])
+            .toArray(),
+
+          // 4. Specialty Appointments Aggregation (Requires Lookup)
+          bookingsCollection
+            .aggregate([
+              { $match: { paymentStatus: "Paid" } },
+              {
+                $lookup: {
+                  from: "doctors", // Ensure this matches your actual MongoDB collection name
+                  localField: "doctorId",
+                  foreignField: "_id",
+                  as: "doctorDetails",
+                },
+              },
+              { $unwind: "$doctorDetails" },
+              {
+                $group: {
+                  _id: "$doctorDetails.specialty",
+                  appointments: { $sum: 1 },
+                },
+              },
+              { $sort: { appointments: -1 } },
+              { $limit: 5 }, // Top 5 specialties
+            ])
+            .toArray(),
+        ]);
 
       // 5. Format Data for the Frontend
       const financials = financialData[0];
@@ -1103,16 +1155,30 @@ app.get(
       const monthlyVolume = financials?.totals[0]?.monthlyVolume || 0;
 
       // Map month numbers to short names for Recharts
-      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-      
-      const formattedTrend = financials?.monthlyTrend.map((item: any) => ({
-        name: monthNames[item._id.month - 1],
-        revenue: item.revenue * PLATFORM_COMMISSION_RATE
-      })) || [];
+      const monthNames = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
+
+      const formattedTrend =
+        financials?.monthlyTrend.map((item: any) => ({
+          name: monthNames[item._id.month - 1],
+          revenue: item.revenue * PLATFORM_COMMISSION_RATE,
+        })) || [];
 
       const formattedSpecialties = specialtyData.map((item: any) => ({
         name: item._id || "Unknown",
-        appointments: item.appointments
+        appointments: item.appointments,
       }));
 
       // 6. Send Response
@@ -1123,24 +1189,135 @@ app.get(
             totalProfit: totalVolume * PLATFORM_COMMISSION_RATE,
             monthlyProfit: monthlyVolume * PLATFORM_COMMISSION_RATE,
             activeDoctors: doctorsCount,
-            totalUsers: usersCount
+            totalUsers: usersCount,
           },
           charts: {
             revenueTrend: formattedTrend,
-            specialtyDistribution: formattedSpecialties
-          }
-        }
+            specialtyDistribution: formattedSpecialties,
+          },
+        },
       });
-
     } catch (error: any) {
       console.error("Admin Overview Aggregation Error:", error);
       res.status(500).json({
         success: false,
         message: "Failed to generate admin overview.",
-        error: error.message
+        error: error.message,
       });
     }
-  }
+  },
+);
+
+app.get(
+  "/api/admin/doctors",
+  verifyToken,
+  verifyAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const doctors = await doctorsCollection
+        .aggregate([
+          {
+            $lookup: {
+              from: "user",
+              localField: "userId",
+              foreignField: "_id",
+              as: "userDetails",
+            },
+          },
+          {
+            $unwind: {
+              path: "$userDetails",
+              preserveNullAndEmptyArrays: true,
+            },
+          },
+          {
+            $addFields: {
+              email: "$userDetails.email",
+            },
+          },
+          {
+            $project: {
+              userDetails: 0, 
+            },
+          },
+          {
+            $sort: { createdAt: -1 },
+          },
+        ])
+        .toArray();
+
+      res.status(200).json({
+        success: true,
+        data: doctors,
+      });
+    } catch (error: any) {
+      console.error("Admin Fetch Doctors Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to fetch doctors list.",
+        error: error.message,
+      });
+    }
+  },
+);
+
+app.patch(
+  "/api/admin/doctors/:id/status",
+  verifyToken,
+  verifyAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const doctorId = req.params.id;
+      const { action } = req.body;
+
+      if (!ObjectId.isValid(doctorId as string)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid Doctor ID" });
+      }
+
+      let updateFields = {};
+
+      switch (action) {
+        case "approve":
+          updateFields = { isApproved: true, status: "Approved" };
+          break;
+        case "reject":
+          updateFields = { isApproved: false, status: "Rejected" };
+          break;
+        case "suspend":
+          updateFields = { isApproved: false, status: "Suspended" };
+          break;
+        default:
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid action" });
+      }
+
+      const result = await doctorsCollection.updateOne(
+        { _id: new ObjectId(doctorId as string) },
+        { $set: updateFields },
+      );
+
+      if (result.matchedCount === 0) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Doctor not found" });
+      }
+
+      res.status(200).json({
+        success: true,
+        message: `Doctor successfully ${action}d.`,
+      });
+    } catch (error: any) {
+      console.error("Admin Update Doctor Status Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to update doctor status.",
+        error: error.message,
+      });
+    }
+  },
 );
 
 // 1. GET PATIENT PROFILE DATA
@@ -1173,9 +1350,15 @@ app.get(
       });
     } catch (error: any) {
       console.error("Fetch Profile Error:", error);
-      res.status(500).json({ success: false, message: "Failed to load profile state", error: error.message });
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: "Failed to load profile state",
+          error: error.message,
+        });
     }
-  }
+  },
 );
 
 // 2. UPDATE / UPSERT PATIENT PROFILE DATA
@@ -1186,12 +1369,20 @@ app.post(
   async (req: AuthenticatedRequest, res: Response) => {
     try {
       const userId = req.user._id;
-      const { name, phone, gender, dateOfBirth, bloodGroup, address, emergencyContact } = req.body;
+      const {
+        name,
+        phone,
+        gender,
+        dateOfBirth,
+        bloodGroup,
+        address,
+        emergencyContact,
+      } = req.body;
 
       // Update core user display name in BetterAuth users collection
       await usersCollection.updateOne(
         { _id: new ObjectId(userId) },
-        { $set: { name, updatedAt: new Date() } }
+        { $set: { name, updatedAt: new Date() } },
       );
 
       // Upsert extended details inside our custom profiles collection
@@ -1208,15 +1399,23 @@ app.post(
             updatedAt: new Date(),
           },
         },
-        { upsert: true } // Creates the document if it doesn't exist yet
+        { upsert: true }, // Creates the document if it doesn't exist yet
       );
 
-      res.status(200).json({ success: true, message: "Profile synchronized successfully" });
+      res
+        .status(200)
+        .json({ success: true, message: "Profile synchronized successfully" });
     } catch (error: any) {
       console.error("Update Profile Error:", error);
-      res.status(500).json({ success: false, message: "Failed to update profile changes", error: error.message });
+      res
+        .status(500)
+        .json({
+          success: false,
+          message: "Failed to update profile changes",
+          error: error.message,
+        });
     }
-  }
+  },
 );
 
 app.listen(port, () => {
