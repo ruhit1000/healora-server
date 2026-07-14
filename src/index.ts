@@ -767,6 +767,106 @@ app.get(
   }
 );
 
+app.get(
+  "/api/doctor/profile",
+  verifyToken,
+  verifyDoctor,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const doctorUserId = req.user._id;
+
+      const doctorProfile = await doctorsCollection.findOne({
+        userId: new ObjectId(doctorUserId),
+      });
+
+      res.status(200).json({
+        success: true,
+        data: doctorProfile,
+      });
+    } catch (error: any) {
+      console.error("Fetch Doctor Profile Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to load clinical profile metrics.",
+        error: error.message,
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/doctor/profile",
+  verifyToken,
+  verifyDoctor,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const doctorUserId = req.user._id;
+      const {
+        name,
+        title,
+        image,
+        specialty,
+        fee,
+        followUpFee,
+        followUpWindowDays,
+        location,
+        bmdcNumber,
+        experienceYears,
+        hospitalAffiliation,
+        biography,
+      } = req.body;
+
+      // Build the update configuration payload securely
+      const updateDoc = {
+        $set: {
+          name,
+          title,
+          image,
+          specialty,
+          fee: Number(fee),
+          followUpFee: Number(followUpFee),
+          followUpWindowDays: Number(followUpWindowDays),
+          location,
+          bmdcNumber,
+          experienceYears: Number(experienceYears),
+          hospitalAffiliation,
+          biography,
+          updatedAt: new Date(),
+        },
+        // These fields are ONLY applied if the profile doesn't exist yet
+        $setOnInsert: {
+          userId: new ObjectId(doctorUserId),
+          isApproved: false, // Strict default for new registrations
+          createdAt: new Date(),
+          patientSatisfactoryScore: { averageRating: 0, totalReviewsCount: 0 },
+          experienceTimeline: [],
+          weeklySlots: [],
+          reviews: [],
+        },
+      };
+
+      const result = await doctorsCollection.updateOne(
+        { userId: new ObjectId(doctorUserId) },
+        updateDoc,
+        { upsert: true }
+      );
+
+      res.status(200).json({
+        success: true,
+        message: "Profile synchronized successfully.",
+        data: result,
+      });
+    } catch (error: any) {
+      console.error("Update Doctor Profile Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to securely update profile.",
+        error: error.message,
+      });
+    }
+  }
+);
+
 // 1. GET PATIENT PROFILE DATA
 app.get(
   "/api/patient/profile",
