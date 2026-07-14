@@ -1022,6 +1022,127 @@ app.get(
   }
 );
 
+// Dashboard API Endpoints for Admins
+app.get(
+  "/api/admin/overview",
+  verifyToken,
+  verifyAdmin,
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      // 1. Time constraints for calculations
+      const now = new Date();
+      const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const sixMonthsAgo = new Date(now.getFullYear(), now.getMonth() - 5, 1);
+
+      // Define your platform's profit cut (e.g., 10%)
+      const PLATFORM_COMMISSION_RATE = 0.10; 
+
+      // 2. Execute all queries concurrently for maximum speed
+      const [usersCount, doctorsCount, financialData, specialtyData] = await Promise.all([
+        usersCollection.estimatedDocumentCount(),
+        doctorsCollection.countDocuments({ isApproved: true }),
+        
+        // 3. Financial & Trend Aggregation
+        bookingsCollection.aggregate([
+          { $match: { paymentStatus: "Paid" } },
+          {
+            $facet: {
+              totals: [
+                {
+                  $group: {
+                    _id: null,
+                    totalVolume: { $sum: "$consultationFee" },
+                    monthlyVolume: {
+                      $sum: {
+                        $cond: [{ $gte: ["$createdAt", firstDayOfMonth] }, "$consultationFee", 0]
+                      }
+                    }
+                  }
+                }
+              ],
+              monthlyTrend: [
+                { $match: { createdAt: { $gte: sixMonthsAgo } } },
+                {
+                  $group: {
+                    _id: { month: { $month: "$createdAt" }, year: { $year: "$createdAt" } },
+                    revenue: { $sum: "$consultationFee" }
+                  }
+                },
+                { $sort: { "_id.year": 1, "_id.month": 1 } }
+              ]
+            }
+          }
+        ]).toArray(),
+
+        // 4. Specialty Appointments Aggregation (Requires Lookup)
+        bookingsCollection.aggregate([
+          { $match: { paymentStatus: "Paid" } },
+          {
+            $lookup: {
+              from: "doctors", // Ensure this matches your actual MongoDB collection name
+              localField: "doctorId",
+              foreignField: "_id",
+              as: "doctorDetails"
+            }
+          },
+          { $unwind: "$doctorDetails" },
+          {
+            $group: {
+              _id: "$doctorDetails.specialty",
+              appointments: { $sum: 1 }
+            }
+          },
+          { $sort: { appointments: -1 } },
+          { $limit: 5 } // Top 5 specialties
+        ]).toArray()
+      ]);
+
+      // 5. Format Data for the Frontend
+      const financials = financialData[0];
+      const totalVolume = financials?.totals[0]?.totalVolume || 0;
+      const monthlyVolume = financials?.totals[0]?.monthlyVolume || 0;
+
+      // Map month numbers to short names for Recharts
+      const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+      
+      const formattedTrend = financials?.monthlyTrend.map((item: any) => ({
+        name: monthNames[item._id.month - 1],
+        revenue: item.revenue * PLATFORM_COMMISSION_RATE
+      })) || [];
+
+      const formattedSpecialties = specialtyData.map((item: any) => ({
+        name: item._id || "Unknown",
+        appointments: item.appointments
+      }));
+
+      // 6. Send Response
+      res.status(200).json({
+        success: true,
+        data: {
+          metrics: {
+            totalProfit: totalVolume * PLATFORM_COMMISSION_RATE,
+            monthlyProfit: monthlyVolume * PLATFORM_COMMISSION_RATE,
+            activeDoctors: doctorsCount,
+            totalUsers: usersCount
+          },
+          charts: {
+            revenueTrend: formattedTrend,
+            specialtyDistribution: formattedSpecialties
+          }
+        }
+      });
+
+    } catch (error: any) {
+      console.error("Admin Overview Aggregation Error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Failed to generate admin overview.",
+        error: error.message
+      });
+    }
+  }
+);
+
 // 1. GET PATIENT PROFILE DATA
 app.get(
   "/api/patient/profile",
