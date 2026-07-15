@@ -1481,10 +1481,6 @@ app.patch(
   },
 );
 
-if (process.env.NODE_ENV !== "production") {
-  app.listen(port, () => {
-    console.log(`Healora API listening smoothly on port ${port}`);
-  });
-}
-
-export default app;
+app.listen(port, () => {
+  console.log(`Healora API listening smoothly on port ${port}`);
+});
