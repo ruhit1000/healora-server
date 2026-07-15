@@ -149,8 +149,6 @@ src/
 
 ---
 
-# 🗄 Database Collections
-
 ## Users
 
 ```ts
