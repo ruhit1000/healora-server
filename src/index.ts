@@ -1481,12 +1481,10 @@ app.patch(
   },
 );
 
-// Only listen locally. Vercel will handle the routing in production.
 if (process.env.NODE_ENV !== "production") {
   app.listen(port, () => {
     console.log(`Healora API listening smoothly on port ${port}`);
   });
 }
 
-// Vercel REQUIRES this export to mount your Express app
 export default app;
